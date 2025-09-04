@@ -14,6 +14,7 @@ import dataloader_gosai
 import numpy as np
 from typing import Callable, Union, List
 from scipy.linalg import sqrtm
+from scipy.stats import pearsonr
 
 # Gosai dataset
 
@@ -226,3 +227,62 @@ def cal_gosai_emb(seqs, model=None):
     pred_dataset = grelu.data.dataset.DFSeqDataset(df_seqs)
     embs = embed_on_dataset(model, pred_dataset, devices=[0])
     return embs # numpy array with shape [n_seqs, 3072, 2]
+
+
+def cal_atac_pred_new(seqs, model=None):
+    """
+    seqs: list of sequences (detokenized ACGT...)
+    """
+    if model is None:
+        model = LightningModel.load_from_checkpoint(os.path.join(base_path, 'mdlm/gosai_data/binary_atac_cell_lines.ckpt'), map_location='cuda')
+    model.eval()
+    tokens = dataloader_gosai.batch_dna_tokenize(seqs)
+    tokens = torch.tensor(tokens).long().cuda()
+    onehot_tokens = torch.nn.functional.one_hot(tokens, num_classes=4).float()
+    preds = model(onehot_tokens.float().transpose(1, 2)).detach().cpu().numpy()
+    return preds.squeeze() # numpy array with shape [n_seqs, 7]
+
+def compare_kmer(kmer1, kmer2, n_sp1, n_sp2):
+    kmer_set = set(kmer1.keys()) | set(kmer2.keys())
+    counts = np.zeros((len(kmer_set), 2))
+    for i, kmer in enumerate(kmer_set):
+        if kmer in kmer1:
+            counts[i][1] = kmer1[kmer] * n_sp2 / n_sp1
+        if kmer in kmer2:
+            counts[i][0] = kmer2[kmer]
+
+    return pearsonr(counts[:, 0], counts[:, 1])
+
+
+from polyleven import levenshtein
+import itertools
+
+MAPPING = {
+    0: 'T',
+    1: 'A',
+    2: 'G',
+    3: 'C'
+}
+
+def edit_dist(seq1, seq2):
+    return levenshtein(seq1, seq2) / 1
+
+def mean_pairwise_distances(seqs):
+    dists = []
+    for pair in itertools.combinations(seqs, 2):
+        dists.append(edit_dist(*pair))
+    return np.mean(dists)   
+
+def levenshtein_diversity(seqs):
+    if isinstance(seqs, list):
+        seqs = torch.stack(seqs)
+    seqs = dataloader_gosai.batch_dna_detokenize(seqs.cpu())
+    return mean_pairwise_distances(seqs)
+
+
+####### DIVERSTIY 를 TDS, DG, CFG, ,SMC, Pretrained 까지 재서 4 seed 로 표 만들기
+####### DIVERSTIY 뿐만 아니라, ATAC-acc라는 지표가 있는데, 이건 DRAKE github oracle.py에 어떻게 계산하는지가 적혀있는걸로 내가 기억함. 
+####### 그래서 DIVERSITY와 ATAC-Acc그리고 3-mer Corr까지 구현해서 하나의 코드 번들로 만들어주면 정말 고맙겠습니다. 
+
+def evaulate(seqs):
+    pass # return diversity(seqs), atac_acc(seqs), 3mer_corr(seqs) 

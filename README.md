@@ -9,6 +9,9 @@ We will make molecule/protein generation part publicaly available soon. The algo
 ![title](media/summary_image.png) ![title](media/summary_algorithm.png)
 
 
+`CUDA_VISIBLE_DEVICES=7 python finetune.py --load_checkpoint_path artifacts/DNA_value:v0/human_enhancer_diffusion_enformer_7_11_1536_16_ep10_it3500.pt --task dna --sample_M 10 --tweedie True`
+
+
 ## Design of Enhancers 
 
 We prepared the pre-trained model using the masked diffusion model [Sahoo et.al, 2024](https://arxiv.org/abs/2406.07524) and the dataset in [Gosai et al., 2023](https://pubmed.ncbi.nlm.nih.gov/37609287/). We aim to generate natural enhancers with higher activities in HepG2 with soft-value based decoding. The first one is SVDD-MC. The second one corresponds to SVDD-PM. Then, generated $r$'s are saved in the log folder. Regarding evaluation of generated samples, you could refer to `eval_simple.ipynb` 

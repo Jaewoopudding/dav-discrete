@@ -19,7 +19,10 @@ from transformers import RobertaConfig
 from torch.nn.parallel import DistributedDataParallel as DDP
 from sklearn.metrics import mean_absolute_error
 from functools import partial
+from tqdm import tqdm, trange
+import copy
 import warnings
+import oracle
 warnings.filterwarnings("ignore")
 
 # from roberta_regression import RobertaForRegression, BertForSequenceClassification
@@ -109,20 +112,84 @@ def run(args, rank=None):
     model.cuda()
     model.eval()
 
-    gen_samples, value_func_preds, reward_model_preds, selected_baseline_preds, baseline_preds = model.controlled_decode_tweedie(
-        gen_batch_num=args.val_batch_num, 
-        sample_M=args.sample_M, 
-        options = args.tweedie
+    timesteps = torch.linspace(1, 1e-5, model.ref_model.config.sampling.steps + 1)
+    dt = (1 - 1e-5) / model.ref_model.config.sampling.steps
+    
+    for param in model.ref_model.parameters():
+        param.requires_grad = True 
+
+    policy_optimizer = torch.optim.AdamW(
+        model.ref_model.parameters(), 
+        lr=1e-4,
+        betas=(0.9, 0.999),
+        eps=1e-8,
+        weight_decay=0.0
     )
 
-    hepg2_values_ours_value_func = value_func_preds.cpu().numpy()
+    pretrained_model = copy.deepcopy(model.ref_model)
 
-    hepg2_values_ours = reward_model_preds.cpu().numpy()
-    hepg2_values_selected = selected_baseline_preds.cpu().numpy()
-    hepg2_values_baseline = baseline_preds.cpu().numpy()
-    print(hepg2_values_baseline.shape)
-    print(hepg2_values_ours )
-    np.savez( "./log/%s-%s_tw" %(args.task, args.reward_name), decoding = hepg2_values_ours, baseline = hepg2_values_baseline)
+    for epoch in tqdm(range(10), desc="Training epochs: ", position=0):
+        model.ref_model.eval()
+        gen_samples, zero_shot_gen_samples, value_func_preds, reward_model_preds, selected_baseline_preds, baseline_preds, q_xs_history, x_history, q_x0_history = model.controlled_decode_rl(
+            gen_batch_num=args.val_batch_num, 
+            sample_M=args.sample_M, 
+            options = args.tweedie
+        )
+     
+        hepg2_values_ours = reward_model_preds.cpu().numpy()
+        hepg2_values_baseline = baseline_preds.cpu().numpy()
+        division = 32
+
+        guided_samples_diversity = oracle.levenshtein_diversity(gen_samples)
+        unguided_samples_diversity = oracle.levenshtein_diversity(zero_shot_gen_samples)
+
+        model.ref_model.train()
+    
+        q_xs_history = torch.stack(q_xs_history)  
+        q_x0_history = torch.stack(q_x0_history) 
+        x_history = torch.stack(x_history)  
+
+        for i in trange(division, desc=f"Policy Training Divisions (batch_size={len(gen_samples)//division})"):
+            loss = 0.0  # float으로 초기화
+            # kl_loss = 0.0
+            train_batch_size = len(gen_samples) // division
+            q_xs_train = q_xs_history[: ,i*train_batch_size:(i+1)*train_batch_size]
+            q_x0_train = q_x0_history[: ,i*train_batch_size:(i+1)*train_batch_size]
+            x_train = x_history[: ,i*train_batch_size:(i+1)*train_batch_size]
+
+            for enum, (q_xs, q_x0, x, t) in tqdm(enumerate(zip(q_xs_train, q_x0_train, x_train, timesteps[:-1])), total=q_xs_train.shape[0], desc=f"Division {i+1}/{division} - Timesteps", leave=False):
+                sigma_t, _ = model.ref_model.noise(t * torch.ones(x.shape[0], device=x.device))
+                logits = model.ref_model.backbone(x, sigma_t)
+                log_probs = model.ref_model._subs_parameterization(logits=logits, xt=x)
+                log_probs = torch.gather(log_probs, -1, torch.argmax(q_x0, dim=-1, keepdim=True)).squeeze(-1)
+                loss += -log_probs.mean()
+
+                # logits_pretrained = pretrained_model.backbone(x, sigma_t)
+                # log_probs_pretrained = pretrained_model._subs_parameterization(logits=logits_pretrained, xt=x)
+                # log_probs_pretrained = torch.gather(log_probs_pretrained, -1, torch.argmax(q_x0, dim=-1, keepdim=True)).squeeze(-1)
+                # kl_div = (-log_probs.exp() + log_probs_pretrained.exp() + log_probs.exp() * (log_probs - log_probs_pretrained))
+                # kl_loss += kl_div.mean()
+
+            loss = loss.mean()
+            policy_optimizer.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.ref_model.parameters(), max_norm=1.0)
+            policy_optimizer.step()
+
+        wandb.log({
+            "eval/hepg2_values_ours": hepg2_values_ours.mean(), 
+            "eval/hepg2_values_baseline": hepg2_values_baseline.mean(),
+            "eval/guided_samples_diversity": guided_samples_diversity,
+            "eval/zeroshot_samples_diversity": unguided_samples_diversity,
+            "loss/policy_loss": loss.item(),
+            "epoch": epoch
+        })
+
+
+        
+
+
+        np.savez( "./log/%s-%s_tw" %(args.task, args.reward_name), decoding = hepg2_values_ours, baseline = hepg2_values_baseline)
 
 
     wandb.finish()

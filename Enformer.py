@@ -17,6 +17,7 @@ from hydra import initialize, compose
 from hydra.core.global_hydra import GlobalHydra
 import dataloader_gosai
 from grelu.lightning import LightningModel
+from tqdm import tqdm, trange
 
 class BaseModel(nn.Module):
     """
@@ -758,7 +759,7 @@ class BaseModel(nn.Module):
         samples = []
         value_func_preds = []
         reward_model_preds = []
-        for i in range(gen_batch_num):
+        for i in trange(gen_batch_num, desc="Generating samples"):
             batch_samples = self.ref_model.controlled_sample_tweedie(self.reward_model, eval_sp_size=self.NUM_SAMPLES_PER_BATCH, sample_M=sample_M, options = options, task=self.task)
             samples.extend(batch_samples)
             onehot_samples = self.transform_samples(batch_samples)
@@ -811,6 +812,68 @@ class BaseModel(nn.Module):
         '''
 
         return samples, torch.cat(value_func_preds), torch.cat(reward_model_preds), top_k_values, torch.cat(baseline_preds)
+
+    @torch.no_grad()
+    def controlled_decode_rl(self, gen_batch_num, sample_M, options):
+        self.reward_model.cuda()
+        self.reward_model.eval()
+
+
+        samples = []
+        value_func_preds = []
+        reward_model_preds = []
+        for i in trange(gen_batch_num, desc="Generating samples", position=1, leave=False):
+            batch_samples, q_xs_history, x_history, q_x0_history = self.ref_model.controlled_sample_rl(self.reward_model, eval_sp_size=self.NUM_SAMPLES_PER_BATCH, sample_M=sample_M, options = options, task=self.task)
+            samples.extend(batch_samples)
+            onehot_samples = self.transform_samples(batch_samples)
+            value_func_preds.extend(self.head(self.embedding(onehot_samples.float())).squeeze(2).detach())
+            if self.task == "rna_saluki":
+                pred = self.reward_model(self.transform_samples_saluki(batch_samples).float()).detach().squeeze(2)
+            elif self.n_tasks==1:
+                pred = self.reward_model(onehot_samples.float().transpose(1, 2)).detach()[:, 0]
+            else:
+                pred = self.reward_model(onehot_samples.float().transpose(1, 2)).detach()
+            reward_model_preds.extend(pred)
+
+        # baseline_samples = []
+        baseline_preds = []
+        all_preds = []
+        for i in range(gen_batch_num*sample_M):
+            batch = self.ref_model.decode_sample(eval_sp_size=self.NUM_SAMPLES_PER_BATCH)
+            onehot_samples = self.transform_samples(batch)
+            if self.task == "rna_saluki":
+                pred = self.reward_model(self.transform_samples_saluki(batch).float()).detach().squeeze(2)
+            elif self.n_tasks == 1 :
+                pred = self.reward_model(onehot_samples.float().transpose(1, 2)).detach()[:, 0]
+            else:
+                pred = self.reward_model(onehot_samples.float().transpose(1, 2)).detach()
+                print("1")
+                '''
+                threshold = 0.8
+                reward_1 = self.reward_model(onehot_samples.float().transpose(1, 2)).detach()[:, 1]
+                reward_2 = self.reward_model(onehot_samples.float().transpose(1, 2)).detach()[:, 2]
+                reward_pes1 = torch.clamp(5.0*(threshold - reward_1),max=1.0)
+                reward_pes2= torch.clamp(5.0*(threshold - reward_2),max=1.0)
+                torch.clamp(self.reward_model(onehot_samples.float().transpose(1, 2)).detach()[:, 1])
+              
+                pred = self.reward_model(onehot_samples.float().transpose(1, 2)).detach()[:, 0] +  torch.log(torch.clamp(reward_pes1,min= 1e-40) ) + torch.log(torch.clamp(reward_pes2,min= 1e-40) ) 
+                '''
+            if i < gen_batch_num:
+                baseline_preds.extend(pred)
+            all_preds.extend(pred)
+
+        top_k_values = torch.cat(baseline_preds)
+        '''
+        print("Baseline sampling done.")
+
+        all_values = torch.cat(all_preds)
+        # Compute the number of top elements to select
+        k = int(len(all_values) / sample_M)
+        # Get the top k values
+        top_k_values, _ = torch.topk(all_values, k)
+        '''
+
+        return samples, batch, torch.cat(value_func_preds), torch.cat(reward_model_preds), top_k_values, torch.cat(baseline_preds), q_xs_history, x_history, q_x0_history
 
     def configure_optimizers(self, train_config):
         # separate out all parameters to those that will and won't experience regularizing weight decay
