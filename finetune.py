@@ -29,6 +29,7 @@ warnings.filterwarnings("ignore")
 from trainer import Trainer, TrainerConfig
 from dataset import DNA_reg_Dataset, SimpleDNATokenizer, DNA_reg_conv_Dataset
 from Enformer import BaseModel, BaseModelMultiSep, ConvHead, EnformerTrunk, TimedEnformerTrunk
+from oracle import DNAQualityAssessor
 
 import wandb 
 
@@ -127,8 +128,9 @@ def run(args, rank=None):
     )
 
     pretrained_model = copy.deepcopy(model.ref_model)
+    evaluator = DNAQualityAssessor()
 
-    for epoch in tqdm(range(10), desc="Training epochs: ", position=0):
+    for epoch in tqdm(range(args.epochs), desc="Training epochs: ", position=0):
         model.ref_model.eval()
         gen_samples, zero_shot_gen_samples, value_func_preds, reward_model_preds, selected_baseline_preds, baseline_preds, q_xs_history, x_history, q_x0_history = model.controlled_decode_rl(
             gen_batch_num=args.val_batch_num, 
@@ -140,9 +142,9 @@ def run(args, rank=None):
         hepg2_values_baseline = baseline_preds.cpu().numpy()
         division = 32
 
-        guided_samples_diversity = oracle.levenshtein_diversity(gen_samples)
-        unguided_samples_diversity = oracle.levenshtein_diversity(zero_shot_gen_samples)
 
+        searched_div, searched_atac, searched_mer_corr = evaluator.evaluate(gen_samples)
+        base_div, base_atac, base_mer_corr = evaluator.evaluate(zero_shot_gen_samples)
         model.ref_model.train()
     
         q_xs_history = torch.stack(q_xs_history)  
@@ -159,10 +161,15 @@ def run(args, rank=None):
 
             for enum, (q_xs, q_x0, x, t) in tqdm(enumerate(zip(q_xs_train, q_x0_train, x_train, timesteps[:-1])), total=q_xs_train.shape[0], desc=f"Division {i+1}/{division} - Timesteps", leave=False):
                 sigma_t, _ = model.ref_model.noise(t * torch.ones(x.shape[0], device=x.device))
+                sigma_s, _ = model.ref_model.noise((t - dt) * torch.ones(x.shape[0], device=x.device))
+                move_chance_t = (1 - torch.exp(-sigma_t))[:, None, None]
+                move_chance_s = (1 - torch.exp(-sigma_s))[:, None, None]
+                weight = - (move_chance_t - move_chance_s) / (1 - move_chance_t)
+
                 logits = model.ref_model.backbone(x, sigma_t)
                 log_probs = model.ref_model._subs_parameterization(logits=logits, xt=x)
                 log_probs = torch.gather(log_probs, -1, torch.argmax(q_x0, dim=-1, keepdim=True)).squeeze(-1)
-                loss += -log_probs.mean()
+                loss += weight * log_probs.mean()
 
                 # logits_pretrained = pretrained_model.backbone(x, sigma_t)
                 # log_probs_pretrained = pretrained_model._subs_parameterization(logits=logits_pretrained, xt=x)
@@ -179,8 +186,12 @@ def run(args, rank=None):
         wandb.log({
             "eval/hepg2_values_ours": hepg2_values_ours.mean(), 
             "eval/hepg2_values_baseline": hepg2_values_baseline.mean(),
-            "eval/guided_samples_diversity": guided_samples_diversity,
-            "eval/zeroshot_samples_diversity": unguided_samples_diversity,
+            "eval/searched_div": searched_div,
+            "eval/searched_atac": searched_atac,
+            "eval/searched_mer_corr": searched_mer_corr,
+            "eval/base_div": base_div,
+            "eval/base_atac": base_atac,
+            "eval/base_mer_corr": base_mer_corr,
             "loss/policy_loss": loss.item(),
             "epoch": epoch
         })
@@ -284,6 +295,9 @@ if __name__ == '__main__':
                         default=False, help='CD-Q')
     parser.add_argument('--dist', action='store_true',
                         default=False, help='use torch.distributed to train the model in parallel')
+
+    parser.add_argument('--epochs', type=int, default=50,
+                        help="number of epochs", required=False)
     args = parser.parse_args()
 
     run(args)

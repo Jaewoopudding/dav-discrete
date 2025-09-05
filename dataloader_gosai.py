@@ -31,6 +31,17 @@ def batch_dna_detokenize(batch_seq):
     detokenized_batch = [''.join(seq) for seq in detokenized_batch]
     return detokenized_batch
 
+def dna_tokenize(seq):
+  return [DNA_ALPHABET[c] for c in seq]
+
+def batch_dna_tokenize(batch_seq):
+    """
+    batch_seq: list of strings
+    return: numpy array of shape [batch_size, seq_len]
+    """
+    tokenized_batch = np.array([[DNA_ALPHABET[c] for c in seq] for seq in batch_seq])
+    return tokenized_batch
+
 
 class DNASequenceDetokenizer:
   def __init__(self):
@@ -73,7 +84,7 @@ class DNASequenceDetokenizer:
 
 class GosaiDataset(torch.utils.data.Dataset):
     def __init__(self, split='train'):
-        data_df = pd.read_csv(os.path.join(BASE_DIR, f'gosai_{split}.csv'))
+        data_df = pd.read_csv('/home/jaewoo/research/SVDD/data/dataset.csv')
         self.seqs = torch.tensor(data_df['seq'].apply(lambda x: [DNA_ALPHABET[c] for c in x]).tolist())
         self.clss = torch.tensor(data_df[['hepg2', 'k562', 'sknsh']].to_numpy())
         LOGGER.info(f'Loaded {split} data: seqs shape: {self.seqs.shape}, clss shape: {self.clss.shape}')

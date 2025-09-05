@@ -15,6 +15,10 @@ import numpy as np
 from typing import Callable, Union, List
 from scipy.linalg import sqrtm
 from scipy.stats import pearsonr
+import os
+from polyleven import levenshtein
+import itertools
+
 
 # Gosai dataset
 
@@ -253,17 +257,6 @@ def compare_kmer(kmer1, kmer2, n_sp1, n_sp2):
 
     return pearsonr(counts[:, 0], counts[:, 1])
 
-
-from polyleven import levenshtein
-import itertools
-
-MAPPING = {
-    0: 'T',
-    1: 'A',
-    2: 'G',
-    3: 'C'
-}
-
 def edit_dist(seq1, seq2):
     return levenshtein(seq1, seq2) / 1
 
@@ -273,6 +266,7 @@ def mean_pairwise_distances(seqs):
         dists.append(edit_dist(*pair))
     return np.mean(dists)   
 
+
 def levenshtein_diversity(seqs):
     if isinstance(seqs, list):
         seqs = torch.stack(seqs)
@@ -280,9 +274,70 @@ def levenshtein_diversity(seqs):
     return mean_pairwise_distances(seqs)
 
 
-####### DIVERSTIY 를 TDS, DG, CFG, ,SMC, Pretrained 까지 재서 4 seed 로 표 만들기
-####### DIVERSTIY 뿐만 아니라, ATAC-acc라는 지표가 있는데, 이건 DRAKE github oracle.py에 어떻게 계산하는지가 적혀있는걸로 내가 기억함. 
-####### 그래서 DIVERSITY와 ATAC-Acc그리고 3-mer Corr까지 구현해서 하나의 코드 번들로 만들어주면 정말 고맙겠습니다. 
+def cal_highexp_kmers(k=3, return_clss=False):
+    train_set = dataloader_gosai.get_datasets_gosai(skip_valid=True)[0]
+    exp_threshold = np.quantile(train_set.clss[:, 0].numpy(), 0.99) # 4.56
+    highexp_indices = [i for i, data in enumerate(train_set) if data['clss'][0] > exp_threshold]
+    highexp_set_sp = torch.utils.data.Subset(train_set, highexp_indices)
+    highexp_seqs = dataloader_gosai.batch_dna_detokenize(highexp_set_sp.dataset.seqs[highexp_set_sp.indices].numpy())
+    highexp_kmers_99 = count_kmers(highexp_seqs, k=k)
+    n_highexp_kmers_99 = len(highexp_indices)
 
-def evaulate(seqs):
-    pass # return diversity(seqs), atac_acc(seqs), 3mer_corr(seqs) 
+    exp_threshold = np.quantile(train_set.clss[:, 0].numpy(), 0.999) # 6.27
+    highexp_indices = [i for i, data in enumerate(train_set) if data['clss'][0] > exp_threshold]
+    highexp_set_sp = torch.utils.data.Subset(train_set, highexp_indices)
+    highexp_seqs = dataloader_gosai.batch_dna_detokenize(highexp_set_sp.dataset.seqs[highexp_set_sp.indices].numpy())
+    highexp_kmers_999 = count_kmers(highexp_seqs, k=k)
+    n_highexp_kmers_999 = len(highexp_indices)
+        
+    return highexp_kmers_99, n_highexp_kmers_99, highexp_kmers_999, n_highexp_kmers_999
+
+
+def cal_atac_pred_new(seqs, model=None):
+    """
+    seqs: list of sequences (detokenized ACGT...) or tokenized tensor
+    """
+    if model is None:
+        model = LightningModel.load_from_checkpoint(os.path.join('/home/jaewoo/research/SVDD/artifacts/ATAC_oracle/binary_atac_cell_lines.ckpt'), map_location='cuda')
+    model.eval()
+    
+    if isinstance(seqs, list):
+        tokens = torch.stack(seqs)
+    else:
+        tokens = seqs
+
+    tokens = tokens.long().cuda()
+    onehot_tokens = torch.nn.functional.one_hot(tokens, num_classes=4).float()
+    preds = model(onehot_tokens.float().transpose(1, 2)).detach().cpu().numpy()
+    return (preds > 0.5).mean().item()
+
+
+def compare_kmer(kmer1, kmer2, n_sp1, n_sp2):
+    kmer_set = set(kmer1.keys()) | set(kmer2.keys())
+    counts = np.zeros((len(kmer_set), 2))
+    for i, kmer in enumerate(kmer_set):
+        if kmer in kmer1:
+            counts[i][1] = kmer1[kmer] * n_sp2 / n_sp1
+        if kmer in kmer2:
+            counts[i][0] = kmer2[kmer]
+    return pearsonr(counts[:, 0], counts[:, 1])[0]
+
+
+class DNAQualityAssessor:
+    def __init__(self):
+        self.diversity = levenshtein_diversity
+        self.atac_acc = cal_atac_pred_new
+        self.mer_corr = compare_kmer
+
+        self.atac_model = LightningModel.load_from_checkpoint(os.path.join('/home/jaewoo/research/SVDD/artifacts/ATAC_oracle/binary_atac_cell_lines.ckpt'), map_location='cuda')
+        _, _, self.highexp_kmers_999, self.n_highexp_kmers_999 = cal_highexp_kmers(k=3, return_clss=False)
+
+    def evaluate(self, seqs):
+        diversity = self.diversity(seqs)
+        atac = self.atac_acc(seqs, self.atac_model)
+        if isinstance(seqs, list):
+            seqs = torch.stack(seqs)
+        seqs = dataloader_gosai.batch_dna_detokenize(seqs.cpu())
+        kmers = count_kmers(seqs, k=3)
+        mer_corr = self.mer_corr(self.highexp_kmers_999, kmers, self.n_highexp_kmers_999, len(seqs))
+        return diversity, atac, mer_corr
