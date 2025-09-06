@@ -814,7 +814,7 @@ class BaseModel(nn.Module):
         return samples, torch.cat(value_func_preds), torch.cat(reward_model_preds), top_k_values, torch.cat(baseline_preds)
 
     @torch.no_grad()
-    def controlled_decode_rl(self, gen_batch_num, sample_M, options):
+    def controlled_decode_rl(self, gen_batch_num, sample_M, options, alpha, gamma):
         self.reward_model.cuda()
         self.reward_model.eval()
 
@@ -823,7 +823,9 @@ class BaseModel(nn.Module):
         value_func_preds = []
         reward_model_preds = []
         for i in trange(gen_batch_num, desc="Generating samples", position=1, leave=False):
-            batch_samples, q_xs_history, x_history, q_x0_history = self.ref_model.controlled_sample_rl(self.reward_model, eval_sp_size=self.NUM_SAMPLES_PER_BATCH, sample_M=sample_M, options = options, task=self.task)
+            batch_samples, q_xs_history, x_history, q_x0_history = self.ref_model.controlled_sample_rl(
+                self.reward_model, eval_sp_size=self.NUM_SAMPLES_PER_BATCH, sample_M=sample_M, options = options, task=self.task, alpha = alpha, gamma = gamma
+            )
             samples.extend(batch_samples)
             onehot_samples = self.transform_samples(batch_samples)
             value_func_preds.extend(self.head(self.embedding(onehot_samples.float())).squeeze(2).detach())

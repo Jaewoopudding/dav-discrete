@@ -56,12 +56,13 @@ def load_tokenizer(tokenizer_path,max_length):
 
 
 def run(args, rank=None):
+    assert args.training_batch_size % args.sample_M == 0
     set_seed(args.seed)
     args_dict = vars(args)
     wandb.init(
         project="DNA-optimization",
         job_type='FA',
-        name='decode',
+        name=f'grad:{args.tweedie}-α:{args.alpha}-γ:{args.gamma}-M:{args.sample_M}-S:{args.seed}',
         # track hyperparameters and run metadata
         config=args_dict
     )
@@ -121,7 +122,7 @@ def run(args, rank=None):
 
     policy_optimizer = torch.optim.AdamW(
         model.ref_model.parameters(), 
-        lr=1e-4,
+        lr=args.learning_rate,
         betas=(0.9, 0.999),
         eps=1e-8,
         weight_decay=0.0
@@ -135,13 +136,15 @@ def run(args, rank=None):
         gen_samples, zero_shot_gen_samples, value_func_preds, reward_model_preds, selected_baseline_preds, baseline_preds, q_xs_history, x_history, q_x0_history = model.controlled_decode_rl(
             gen_batch_num=args.val_batch_num, 
             sample_M=args.sample_M, 
-            options = args.tweedie
+            options = args.tweedie,
+            alpha = args.alpha,
+            gamma = args.gamma
         )
      
         hepg2_values_ours = reward_model_preds.cpu().numpy()
         hepg2_values_baseline = baseline_preds.cpu().numpy()
         division = 32
-
+        samples_per_division = len(gen_samples) // division
 
         searched_div, searched_atac, searched_mer_corr = evaluator.evaluate(gen_samples)
         base_div, base_atac, base_mer_corr = evaluator.evaluate(zero_shot_gen_samples)
@@ -151,8 +154,11 @@ def run(args, rank=None):
         q_x0_history = torch.stack(q_x0_history) 
         x_history = torch.stack(x_history)  
 
+        print(f"#### hepg2_values_ours: {hepg2_values_ours.median()}")
+
         for i in trange(division, desc=f"Policy Training Divisions (batch_size={len(gen_samples)//division})"):
             loss = 0.0  # float으로 초기화
+            policy_optimizer.zero_grad()
             # kl_loss = 0.0
             train_batch_size = len(gen_samples) // division
             q_xs_train = q_xs_history[: ,i*train_batch_size:(i+1)*train_batch_size]
@@ -166,10 +172,11 @@ def run(args, rank=None):
                 move_chance_s = (1 - torch.exp(-sigma_s))[:, None, None]
                 weight = - (move_chance_t - move_chance_s) / (1 - move_chance_t)
 
+                copy_flag = (x != model.ref_model.mask_index).to(x.dtype)
                 logits = model.ref_model.backbone(x, sigma_t)
                 log_probs = model.ref_model._subs_parameterization(logits=logits, xt=x)
                 log_probs = torch.gather(log_probs, -1, torch.argmax(q_x0, dim=-1, keepdim=True)).squeeze(-1)
-                loss += weight * log_probs.mean()
+                loss += copy_flag * weight * log_probs.mean()
 
                 # logits_pretrained = pretrained_model.backbone(x, sigma_t)
                 # log_probs_pretrained = pretrained_model._subs_parameterization(logits=logits_pretrained, xt=x)
@@ -178,14 +185,17 @@ def run(args, rank=None):
                 # kl_loss += kl_div.mean()
 
             loss = loss.mean()
-            policy_optimizer.zero_grad()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.ref_model.parameters(), max_norm=1.0)
-            policy_optimizer.step()
+
+            if (i + 1) * samples_per_division % args.training_batch_size == 0:
+                torch.nn.utils.clip_grad_norm_(model.ref_model.parameters(), max_norm=1.0)
+                policy_optimizer.step()
+                policy_optimizer.zero_grad()
+
 
         wandb.log({
-            "eval/hepg2_values_ours": hepg2_values_ours.mean(), 
-            "eval/hepg2_values_baseline": hepg2_values_baseline.mean(),
+            "eval/hepg2_values_ours": hepg2_values_ours.median(), 
+            "eval/hepg2_values_baseline": hepg2_values_baseline.median(),
             "eval/searched_div": searched_div,
             "eval/searched_atac": searched_atac,
             "eval/searched_mer_corr": searched_mer_corr,
@@ -288,7 +298,6 @@ if __name__ == '__main__':
                         help="fixed condition num", required=False)
     parser.add_argument('--conditions_path', default=None,
                         help="Path to the generation condition", required=False)
-    parser.add_argument('--tweedie',type=str,  default = True, help='Use Tweedie formula or heuristc', required=True)
     parser.add_argument('--conditions_split_id_path', default=None,
                         help="Path to the conditions_split_id", required=False)
     parser.add_argument('--cdq', action='store_true',
@@ -298,6 +307,15 @@ if __name__ == '__main__':
 
     parser.add_argument('--epochs', type=int, default=50,
                         help="number of epochs", required=False)
+    parser.add_argument('--learning_rate', type=float, default=1e-4,
+                        help="learning rate", required=False)
+    parser.add_argument('--alpha', type=float, default=0.01,
+                        help="coefficient for the kl regularization", required=False)
+    parser.add_argument('--gamma', type=float, default=1.0,
+                        help="coefficient for the discount factor", required=False)
+    parser.add_argument('--tweedie',type=str,  default = True, help='gradient guidance', required=True)
+    parser.add_argument("--training_batch_size", type=int, default=64, help="batch division", required=False)
+
     args = parser.parse_args()
 
     run(args)

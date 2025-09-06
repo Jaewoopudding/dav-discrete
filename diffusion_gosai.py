@@ -35,6 +35,29 @@ def _sample_categorical(categorical_probs):
   return (categorical_probs / gumbel_norm).argmax(dim=-1)
 
 
+def _sample_gumbel_softmax(logits, temperature=1.0, hard=True):
+  # Generate Gumbel noise
+  gumbel_noise = -torch.log(-torch.log(torch.rand_like(logits) + 1e-10) + 1e-10)
+  
+  # Add noise to logits and apply temperature
+  noisy_logits = (logits + gumbel_noise) / temperature
+  
+  # Apply softmax to get soft samples
+  soft_samples = torch.nn.functional.softmax(noisy_logits, dim=-1)
+  
+  if hard:
+    # Hard sampling with straight-through estimator
+    hard_samples = torch.nn.functional.one_hot(
+      soft_samples.argmax(dim=-1), 
+      num_classes=logits.size(-1)
+    ).float()
+    
+    # Straight-through: forward pass uses hard, backward pass uses soft
+    return hard_samples - soft_samples.detach() + soft_samples
+  else:
+    return soft_samples
+
+
 def _unsqueeze(x, reference):
   return x.view(
     * x.shape,
@@ -1146,7 +1169,7 @@ class Diffusion(L.LightningModule):
     return x
 
   @torch.no_grad()
-  def controlled_sample_rl(self, reward_model, num_steps=None, eps=1e-5, eval_sp_size=None, sample_M=10, options = True, task='dna'):
+  def controlled_sample_rl(self, reward_model, num_steps=None, eps=1e-5, eval_sp_size=None, sample_M=10, options = True, task='dna', alpha = 1.0, gamma = 1.0):
     """Generate samples from the model."""
     q_xs_history = []
     q_x0_history = []
@@ -1173,7 +1196,7 @@ class Diffusion(L.LightningModule):
         x.shape[0], 1, device=self.device)
       if self.sampler == 'ddpm':
         x_history.append(x)
-        x, x1, q_xs, x3, predicted_x0s_of_final_samples = self._ddpm_update_finetune_controlled_rl(x, t, dt, reward_model, repeats=sample_M, options = options, task=task)
+        x, x1, q_xs, x3, predicted_x0s_of_final_samples = self._ddpm_update_finetune_controlled_rl(x, t, dt, reward_model, repeats=sample_M, options = options, task=task, alpha = alpha, gamma = gamma)
         q_x0_history.append(predicted_x0s_of_final_samples)
         q_xs_history.append(q_xs)
       else:
@@ -1374,8 +1397,8 @@ class Diffusion(L.LightningModule):
     expected_x0 = torch.nn.functional.softmax(expected_x0, dim =2)
     scores = reward_model(expected_x0.transpose(1, 2)[:,0:4,:])[:, 0]
     scores = scores.mean()
-    scores.backward()
-    x_grad = x_onehot.grad.clone()
+    scores.backward() 
+    x_grad = x_onehot.grad.clone() 
     return x_grad
 
   def _ddpm_update_finetune_classfier(self, x, t, dt, pre_scorer_embedding, pre_scorer_head, guidance_scale):
@@ -1495,7 +1518,10 @@ class Diffusion(L.LightningModule):
     return final_samples, x, q_xs, copy_flag
 
   @torch.no_grad()
-  def _ddpm_update_finetune_controlled_rl(self, x, t, dt, reward_model, repeats=10, options = "True", task="dna"):
+  def _ddpm_update_finetune_controlled_rl(self, x, t, dt, reward_model, repeats=10, options = "True", task="dna", alpha = 1.0, gamma = 1.0):
+    total_steps = self.config.sampling.steps
+    current_timestep_idx = total_steps - int(torch.round((1 - t) / dt)[0])
+
     sigma_t, _ = self.noise(t)
     sigma_s, _ = self.noise(t - dt)
     if sigma_t.ndim > 1:
@@ -1509,7 +1535,28 @@ class Diffusion(L.LightningModule):
     move_chance_t = move_chance_t[:, None, None]
     move_chance_s = move_chance_s[:, None, None]
     unet_conditioning = sigma_t
-    log_p_x0 = self.forward(x, unet_conditioning)
+
+    sigma = self._process_sigma(unet_conditioning)
+    copy_flag = (x != self.mask_index).to(x.dtype)
+
+
+    with torch.cuda.amp.autocast(dtype=torch.float32):
+      logits = self.backbone(x, sigma)
+      
+      if options == "True":
+        with torch.enable_grad():
+          x_onehot = torch.nn.functional.one_hot(x, 5).float()
+          x_onehot = x_onehot.requires_grad_(True)
+          one_hot_logits = self.backbone.forward2(x_onehot, sigma)
+          log_p_x0 = self._subs_parameterization(logits=one_hot_logits, xt=x)
+          p_x0 = log_p_x0.exp()
+          p_x0 = copy_flag[:, :, None] * x_onehot + (1 - copy_flag[:, :, None]) * p_x0
+          predicted_x0 = _sample_gumbel_softmax(p_x0, temperature=1.0, hard=True) ## TODO : Gumbel softmax temperature
+          score = (reward_model(predicted_x0.transpose(1, 2)[:,0:4,:])[:, 0]).mean()
+          gradient_guidance = torch.autograd.grad(score, x_onehot)[0]
+          logits = logits + gamma ** (current_timestep_idx - 1) / alpha * gradient_guidance
+
+    log_p_x0 = self._subs_parameterization(logits=logits, xt=x)
     assert move_chance_t.ndim == log_p_x0.ndim
     # Technically, this isn't q_xs since there's a division
     # term that is missing. This division term doesn't affect
@@ -1518,7 +1565,6 @@ class Diffusion(L.LightningModule):
     q_xs[:, :, self.mask_index] = move_chance_s[:, :, 0]
 
     # _x = _sample_categorical(q_xs)
-    copy_flag = (x != self.mask_index).to(x.dtype)
     # return copy_flag * x + (1 - copy_flag) * _x, x, q_xs, copy_flag
 
     # Generate 10 samples for each position
@@ -1529,19 +1575,12 @@ class Diffusion(L.LightningModule):
 
     scores = []
     predicted_x0s = []
-    for i in range(repeats):
-      if options == "True": # Use Tweedie's formula. Aim to calcuate r(E[x_0|x_t])
-        expected_x0 = self.forward(samples[i], sigma_s) # Calcualte E[x_0|x_t] ## 로짓이 계산되어 나온다.
-        expected_x0_arg = torch.argmax(expected_x0,dim=2) ## 로짓을 통해서 x_0을 categorical 로 샘플링한다. (이부분에서 gumbel softmax를 사용해야 할 것이다.)
-        expected_x0_onehot = torch.nn.functional.one_hot(expected_x0_arg) ## categorical을 one-hot으로 변환한다.
-        copy_next_flag = (samples[i] != self.mask_index).to(x.dtype)
-        expected_x0_onehot = copy_next_flag[:, :, None] * torch.nn.functional.one_hot(samples[i])[:, :, 0:4] + (1 - copy_next_flag[:, :, None]) * expected_x0_onehot  
-      else: # Use heuristc to make masked sequnce to be 0. I think you used this one before?
-        raw_seq = torch.nn.functional.one_hot(samples[i], 5)
-        raw_seq = raw_seq[:,:,0:4]
-        copy_flag = (samples[i] != self.mask_index).to(raw_seq.dtype)
-        expected_x0_onehot = copy_flag[:, :, None] * raw_seq
-      #expected_x0_arg = samples[i] #This means we use raw x_t
+    for i in range(repeats): 
+      expected_x0 = self.forward(samples[i], sigma_s) # Calcualte E[x_0|x_t] ## 로짓이 계산되어 나온다.
+      expected_x0_arg = torch.argmax(expected_x0,dim=2) ## 로짓을 통해서 x_0을 categorical 로 샘플링한다. (이부분에서 gumbel softmax를 사용해야 할 것이다.)
+      expected_x0_onehot = torch.nn.functional.one_hot(expected_x0_arg) ## categorical을 one-hot으로 변환한다.
+      copy_next_flag = (samples[i] != self.mask_index).to(x.dtype)
+      expected_x0_onehot = copy_next_flag[:, :, None] * torch.nn.functional.one_hot(samples[i])[:, :, 0:4] + (1 - copy_next_flag[:, :, None]) * expected_x0_onehot  
       if task == "rna_saluki":
         scorer = reward_model(self.transform_samples_saluki(expected_x0_onehot).float()).detach().squeeze(2)
       else:
