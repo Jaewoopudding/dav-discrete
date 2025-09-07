@@ -1555,6 +1555,8 @@ class Diffusion(L.LightningModule):
           score = (reward_model(predicted_x0.transpose(1, 2)[:,0:4,:])[:, 0]).mean()
           gradient_guidance = torch.autograd.grad(score, x_onehot)[0]
           logits = base_logits + gamma ** (current_timestep_idx - 1) / alpha * gradient_guidance
+      else:
+        logits = base_logits
 
     log_p_x0 = self._subs_parameterization(logits=logits, xt=x)
     base_log_p_x0 = self._subs_parameterization(logits=base_logits, xt=x)

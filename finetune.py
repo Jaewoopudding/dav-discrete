@@ -60,7 +60,7 @@ def run(args, rank=None):
     set_seed(args.seed)
     args_dict = vars(args)
     wandb.init(
-        project="DNA-optimization",
+        project="DAV-DNA-optimization",
         job_type='FA',
         name=f'grad:{args.tweedie}-α:{args.alpha}-γ:{args.gamma}-M:{args.sample_M}-B:{args.training_batch_size}/{args.batch_size}-S:{args.seed}-{args.tag}',
         # track hyperparameters and run metadata
@@ -130,10 +130,11 @@ def run(args, rank=None):
 
     pretrained_model = copy.deepcopy(model.ref_model)
     evaluator = DNAQualityAssessor()
+    model.set_double_reward_model() 
 
     for epoch in tqdm(range(args.epochs), desc="Training epochs: ", position=0):
         model.ref_model.eval()
-        gen_samples, zero_shot_gen_samples, value_func_preds, reward_model_preds, selected_baseline_preds, baseline_preds, q_xs_history, x_history, q_x0_history = model.controlled_decode_rl(
+        gen_samples, zero_shot_gen_samples, value_func_preds, reward_model_preds, eval_reward_model_preds, selected_baseline_preds, baseline_preds, eval_base_reward_model_preds, q_xs_history, x_history, q_x0_history = model.controlled_decode_rl(
             gen_batch_num=args.val_batch_num, 
             sample_M=args.sample_M, 
             options = args.tweedie,
@@ -143,6 +144,9 @@ def run(args, rank=None):
      
         hepg2_values_ours = reward_model_preds.cpu().numpy()
         hepg2_values_baseline = baseline_preds.cpu().numpy()
+        eval_hepg2_values_ours = eval_reward_model_preds.cpu().numpy()
+        eval_hepg2_values_baseline = eval_base_reward_model_preds.cpu().numpy()
+
         division = 32
         samples_per_division = len(gen_samples) // division
 
@@ -154,7 +158,11 @@ def run(args, rank=None):
         q_x0_history = torch.stack(q_x0_history) 
         x_history = torch.stack(x_history)  
 
-        print(f"#### hepg2_values_ours: {np.median(hepg2_values_ours)}")
+        print(f"==== train: hepg2_values_ours: {np.median(hepg2_values_ours)}")
+        print(f"==== train: hepg2_values_baseline: {np.median(hepg2_values_baseline)}")
+        print(f"==== eval : hepg2_values_ours: {np.median(eval_hepg2_values_ours)}")
+        print(f"==== eval : hepg2_values_baseline: {np.median(eval_hepg2_values_baseline)}")
+
         for inner_epoch in range(args.inner_epochs):
             for i in trange(division, desc=f"Policy Training Divisions (batch_size={len(gen_samples)//division})"):
                 loss = 0.0  # float으로 초기화
@@ -194,14 +202,16 @@ def run(args, rank=None):
 
 
         wandb.log({
-            "eval/hepg2_values_ours": np.median(hepg2_values_ours), 
-            "eval/hepg2_values_baseline": np.median(hepg2_values_baseline),
-            "eval/searched_div": searched_div,
-            "eval/searched_atac": searched_atac,
-            "eval/searched_mer_corr": searched_mer_corr,
-            "eval/base_div": base_div,
-            "eval/base_atac": base_atac,
-            "eval/base_mer_corr": base_mer_corr,
+            "reward/hepg2_values_searched": np.median(hepg2_values_ours), 
+            "reward/hepg2_values_baseline": np.median(hepg2_values_baseline),
+            "reward/eval_hepg2_values_searched": np.median(eval_hepg2_values_ours),
+            "reward/eval_hepg2_values_baseline": np.median(eval_hepg2_values_baseline),
+            "div/searched_div": searched_div,
+            "atac/searched_atac": searched_atac,
+            "mer_corr/searched_mer_corr": searched_mer_corr,
+            "div/base_div": base_div,
+            "atac/base_atac": base_atac,
+            "mer_corr/base_mer_corr": base_mer_corr,
             "loss/policy_loss": loss.item(),
             "epoch": epoch
         })

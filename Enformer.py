@@ -267,6 +267,18 @@ class BaseModel(nn.Module):
 
         return loss
 
+    def set_double_reward_model(self):
+        self.reward_model = LightningModel.load_from_checkpoint("artifacts/Pred_acc_oracle/reward_oracle_ft.ckpt", map_location='cpu')
+        self.eval_reward_model = LightningModel.load_from_checkpoint("artifacts/Pred_acc_oracle/reward_oracle_eval.ckpt", map_location='cpu')
+        self.reward_model.cuda()
+        self.reward_model.eval()
+        for param in self.reward_model.parameters():
+            param.requires_grad = False
+        self.eval_reward_model.cuda()
+        self.eval_reward_model.eval()
+        for param in self.eval_reward_model.parameters():
+            param.requires_grad = False
+
     def transform_samples(self, samples, num_classes=4):
         # One-hot encode the tensor but first mask out the '4's
         mask = samples != 4
@@ -822,6 +834,7 @@ class BaseModel(nn.Module):
         samples = []
         value_func_preds = []
         reward_model_preds = []
+        eval_reward_model_preds = []
         for i in trange(gen_batch_num, desc="Generating samples", position=1, leave=False):
             batch_samples, q_xs_history, x_history, q_x0_history = self.ref_model.controlled_sample_rl(
                 self.reward_model, eval_sp_size=self.NUM_SAMPLES_PER_BATCH, sample_M=sample_M, options = options, task=self.task, alpha = alpha, gamma = gamma
@@ -836,9 +849,12 @@ class BaseModel(nn.Module):
             else:
                 pred = self.reward_model(onehot_samples.float().transpose(1, 2)).detach()
             reward_model_preds.extend(pred)
+            eval_pred = self.eval_reward_model(onehot_samples.float().transpose(1, 2)).detach()[:, 0]
+            eval_reward_model_preds.extend(eval_pred)
 
         # baseline_samples = []
         baseline_preds = []
+        eval_base_reward_model_preds = []
         all_preds = []
         for i in range(gen_batch_num*sample_M):
             batch = self.ref_model.decode_sample(eval_sp_size=self.NUM_SAMPLES_PER_BATCH)
@@ -863,6 +879,8 @@ class BaseModel(nn.Module):
             if i < gen_batch_num:
                 baseline_preds.extend(pred)
             all_preds.extend(pred)
+            eval_base_pred = self.eval_reward_model(onehot_samples.float().transpose(1, 2)).detach()[:, 0]
+            eval_base_reward_model_preds.extend(eval_base_pred)
 
         top_k_values = torch.cat(baseline_preds)
         '''
@@ -875,7 +893,7 @@ class BaseModel(nn.Module):
         top_k_values, _ = torch.topk(all_values, k)
         '''
 
-        return samples, batch, torch.cat(value_func_preds), torch.cat(reward_model_preds), top_k_values, torch.cat(baseline_preds), q_xs_history, x_history, q_x0_history
+        return samples, batch, torch.cat(value_func_preds), torch.cat(reward_model_preds), torch.cat(eval_reward_model_preds), top_k_values, torch.cat(baseline_preds), torch.cat(eval_base_reward_model_preds), q_xs_history, x_history, q_x0_history
 
     def configure_optimizers(self, train_config):
         # separate out all parameters to those that will and won't experience regularizing weight decay
