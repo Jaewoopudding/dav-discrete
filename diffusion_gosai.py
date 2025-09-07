@@ -1541,7 +1541,7 @@ class Diffusion(L.LightningModule):
 
 
     with torch.cuda.amp.autocast(dtype=torch.float32):
-      logits = self.backbone(x, sigma)
+      base_logits = self.backbone(x, sigma)
       
       if options == "True":
         with torch.enable_grad():
@@ -1554,31 +1554,36 @@ class Diffusion(L.LightningModule):
           predicted_x0 = _sample_gumbel_softmax(p_x0, temperature=1.0, hard=True) ## TODO : Gumbel softmax temperature
           score = (reward_model(predicted_x0.transpose(1, 2)[:,0:4,:])[:, 0]).mean()
           gradient_guidance = torch.autograd.grad(score, x_onehot)[0]
-          logits = logits + gamma ** (current_timestep_idx - 1) / alpha * gradient_guidance
+          logits = base_logits + gamma ** (current_timestep_idx - 1) / alpha * gradient_guidance
 
     log_p_x0 = self._subs_parameterization(logits=logits, xt=x)
+    base_log_p_x0 = self._subs_parameterization(logits=base_logits, xt=x)
+
     assert move_chance_t.ndim == log_p_x0.ndim
     # Technically, this isn't q_xs since there's a division
     # term that is missing. This division term doesn't affect
     # the samples.
     q_xs = log_p_x0.exp() * (move_chance_t - move_chance_s)
     q_xs[:, :, self.mask_index] = move_chance_s[:, :, 0]
+    base_q_xs = base_log_p_x0.exp() * (move_chance_t - move_chance_s)
+    base_q_xs[:, :, self.mask_index] = move_chance_s[:, :, 0]
 
     # _x = _sample_categorical(q_xs)
     # return copy_flag * x + (1 - copy_flag) * _x, x, q_xs, copy_flag
 
     # Generate 10 samples for each position
     samples = [copy_flag * x + (1 - copy_flag) * _sample_categorical(q_xs) for _ in range(repeats)]
+    # 독립 토큰들의 joint probability는 sum으로 계산
+    log_q_xs = torch.stack([torch.gather(q_xs.log(), -1, sample.unsqueeze(-1)).squeeze(-1) for sample in samples]).sum(-1).transpose(0, 1)
+    base_log_q_xs = torch.stack([torch.gather(base_q_xs.log(), -1, sample.unsqueeze(-1)).squeeze(-1) for sample in samples]).sum(-1).transpose(0, 1)
 
-    # samples_tensor = torch.stack(samples, dim=0)  # Shape [10, batch_size, seq_length]
-    # Get scores for each sample
 
     scores = []
     predicted_x0s = []
     for i in range(repeats): 
-      expected_x0 = self.forward(samples[i], sigma_s) # Calcualte E[x_0|x_t] ## 로짓이 계산되어 나온다.
-      expected_x0_arg = torch.argmax(expected_x0,dim=2) ## 로짓을 통해서 x_0을 categorical 로 샘플링한다. (이부분에서 gumbel softmax를 사용해야 할 것이다.)
-      expected_x0_onehot = torch.nn.functional.one_hot(expected_x0_arg, num_classes=4) ## categorical을 one-hot으로 변환한다.
+      expected_x0 = self.forward(samples[i], sigma_s)
+      expected_x0_arg = torch.argmax(expected_x0,dim=2)
+      expected_x0_onehot = torch.nn.functional.one_hot(expected_x0_arg, num_classes=4)
       copy_next_flag = (samples[i] != self.mask_index).to(x.dtype)
       expected_x0_onehot = copy_next_flag[:, :, None] * torch.nn.functional.one_hot(samples[i])[:, :, 0:4] + (1 - copy_next_flag[:, :, None]) * expected_x0_onehot  
       if task == "rna_saluki":
@@ -1589,22 +1594,11 @@ class Diffusion(L.LightningModule):
       scores.append(scorer.squeeze())
       predicted_x0s.append(expected_x0_onehot)
 
+    scores = gamma ** (current_timestep_idx - 1) / alpha * torch.stack(scores, dim=1) 
+    importance_weights = scores + base_log_q_xs - log_q_xs
+    importance_weights = torch.softmax(importance_weights, dim=1)  # Convert scores to probabilities for each batch
 
-    # scores = torch.softmax(scores, dim=0)  # Convert scores to probabilities
-    # # Sample from the weighted categorical distribution formed by scores
-    # final_sample_indices = torch.multinomial(scores, 1).squeeze(0)  # Shape [batch_size, seq_length]
-    # # final_samples = samples_tensor[final_sample_indices, torch.arange(x.shape[0]), :]  # Select the chosen samples
-    # final_samples = samples[final_sample_indices]
-    # # copy_flag = (x != self.mask_index).to(x.dtype)
-
-    # scores = pre_scorer_head(pre_scorer_input).view(x.size(0), 10)  # Reshape scores to [batch_size, 10]
-    scores = torch.stack(scores, dim=1)
-    scores = torch.softmax(scores, dim=1)  # Convert scores to probabilities for each batch
-
-    # # Sample from the weighted categorical distribution formed by scores
-    # final_sample_indices = torch.multinomial(scores, 1).squeeze(1)  # Shape [batch_size]
-    # Select the index of the highest score for each batch
-    final_sample_indices = torch.argmax(scores, dim=1).squeeze()  # Shape [batch_size]
+    final_sample_indices = torch.multinomial(importance_weights, num_samples=1).squeeze(-1)  # Shape [batch_size]
     final_samples = [samples[final_sample_indices[j]][j,:] for j in range(x.size(0))]  # Select the chosen samples using gathered indices
     final_samples = torch.stack(final_samples, dim=0)
     predicted_x0s_of_final_samples = torch.stack([predicted_x0s[final_sample_indices[j]][j,:] for j in range(x.size(0))], dim=0)
