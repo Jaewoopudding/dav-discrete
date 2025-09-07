@@ -56,13 +56,13 @@ def load_tokenizer(tokenizer_path,max_length):
 
 
 def run(args, rank=None):
-    assert args.training_batch_size % args.sample_M == 0
+    assert args.batch_size % args.training_batch_size == 0
     set_seed(args.seed)
     args_dict = vars(args)
     wandb.init(
         project="DNA-optimization",
         job_type='FA',
-        name=f'grad:{args.tweedie}-α:{args.alpha}-γ:{args.gamma}-M:{args.sample_M}-S:{args.seed}',
+        name=f'grad:{args.tweedie}-α:{args.alpha}-γ:{args.gamma}-M:{args.sample_M}-B:{args.training_batch_size}/{args.batch_size}-S:{args.seed}-{args.tag}',
         # track hyperparameters and run metadata
         config=args_dict
     )
@@ -154,48 +154,48 @@ def run(args, rank=None):
         q_x0_history = torch.stack(q_x0_history) 
         x_history = torch.stack(x_history)  
 
-        print(f"#### hepg2_values_ours: {hepg2_values_ours.median()}")
-
-        for i in trange(division, desc=f"Policy Training Divisions (batch_size={len(gen_samples)//division})"):
-            loss = 0.0  # float으로 초기화
-            policy_optimizer.zero_grad()
-            # kl_loss = 0.0
-            train_batch_size = len(gen_samples) // division
-            q_xs_train = q_xs_history[: ,i*train_batch_size:(i+1)*train_batch_size]
-            q_x0_train = q_x0_history[: ,i*train_batch_size:(i+1)*train_batch_size]
-            x_train = x_history[: ,i*train_batch_size:(i+1)*train_batch_size]
-
-            for enum, (q_xs, q_x0, x, t) in tqdm(enumerate(zip(q_xs_train, q_x0_train, x_train, timesteps[:-1])), total=q_xs_train.shape[0], desc=f"Division {i+1}/{division} - Timesteps", leave=False):
-                sigma_t, _ = model.ref_model.noise(t * torch.ones(x.shape[0], device=x.device))
-                sigma_s, _ = model.ref_model.noise((t - dt) * torch.ones(x.shape[0], device=x.device))
-                move_chance_t = (1 - torch.exp(-sigma_t))[:, None, None]
-                move_chance_s = (1 - torch.exp(-sigma_s))[:, None, None]
-                weight = - (move_chance_t - move_chance_s) / (1 - move_chance_t)
-
-                copy_flag = (x != model.ref_model.mask_index).to(x.dtype)
-                logits = model.ref_model.backbone(x, sigma_t)
-                log_probs = model.ref_model._subs_parameterization(logits=logits, xt=x)
-                log_probs = torch.gather(log_probs, -1, torch.argmax(q_x0, dim=-1, keepdim=True)).squeeze(-1)
-                loss += copy_flag * weight * log_probs.mean()
-
-                # logits_pretrained = pretrained_model.backbone(x, sigma_t)
-                # log_probs_pretrained = pretrained_model._subs_parameterization(logits=logits_pretrained, xt=x)
-                # log_probs_pretrained = torch.gather(log_probs_pretrained, -1, torch.argmax(q_x0, dim=-1, keepdim=True)).squeeze(-1)
-                # kl_div = (-log_probs.exp() + log_probs_pretrained.exp() + log_probs.exp() * (log_probs - log_probs_pretrained))
-                # kl_loss += kl_div.mean()
-
-            loss = loss.mean()
-            loss.backward()
-
-            if (i + 1) * samples_per_division % args.training_batch_size == 0:
-                torch.nn.utils.clip_grad_norm_(model.ref_model.parameters(), max_norm=1.0)
-                policy_optimizer.step()
+        print(f"#### hepg2_values_ours: {np.median(hepg2_values_ours)}")
+        for inner_epoch in range(args.inner_epochs):
+            for i in trange(division, desc=f"Policy Training Divisions (batch_size={len(gen_samples)//division})"):
+                loss = 0.0  # float으로 초기화
                 policy_optimizer.zero_grad()
+                # kl_loss = 0.0
+                train_batch_size = len(gen_samples) // division
+                q_xs_train = q_xs_history[: ,i*train_batch_size:(i+1)*train_batch_size]
+                q_x0_train = q_x0_history[: ,i*train_batch_size:(i+1)*train_batch_size]
+                x_train = x_history[: ,i*train_batch_size:(i+1)*train_batch_size]
+
+                for enum, (q_xs, q_x0, x, t) in tqdm(enumerate(zip(q_xs_train, q_x0_train, x_train, timesteps[:-1])), total=q_xs_train.shape[0], desc=f"Division {i+1}/{division} - Timesteps", leave=False):
+                    sigma_t, _ = model.ref_model.noise(t * torch.ones(x.shape[0], device=x.device))
+                    sigma_s, _ = model.ref_model.noise((t - dt) * torch.ones(x.shape[0], device=x.device))
+                    move_chance_t = (1 - torch.exp(-sigma_t))[:, None, None]
+                    move_chance_s = (1 - torch.exp(-sigma_s))[:, None, None]
+                    weight = - (move_chance_t - move_chance_s) / (1 - move_chance_t)
+
+                    copy_flag = (x != model.ref_model.mask_index).to(x.dtype)
+                    logits = model.ref_model.backbone(x, sigma_t)
+                    log_probs = model.ref_model._subs_parameterization(logits=logits, xt=x)
+                    log_probs = torch.gather(log_probs, -1, torch.argmax(q_x0, dim=-1, keepdim=True)).squeeze(-1)
+                    loss += copy_flag * weight * log_probs.mean()
+
+                    # logits_pretrained = pretrained_model.backbone(x, sigma_t)
+                    # log_probs_pretrained = pretrained_model._subs_parameterization(logits=logits_pretrained, xt=x)
+                    # log_probs_pretrained = torch.gather(log_probs_pretrained, -1, torch.argmax(q_x0, dim=-1, keepdim=True)).squeeze(-1)
+                    # kl_div = (-log_probs.exp() + log_probs_pretrained.exp() + log_probs.exp() * (log_probs - log_probs_pretrained))
+                    # kl_loss += kl_div.mean()
+
+                loss = loss.mean()
+                loss.backward()
+
+                if (i + 1) * samples_per_division % args.training_batch_size == 0:
+                    torch.nn.utils.clip_grad_norm_(model.ref_model.parameters(), max_norm=1.0)
+                    policy_optimizer.step()
+                    policy_optimizer.zero_grad()
 
 
         wandb.log({
-            "eval/hepg2_values_ours": hepg2_values_ours.median(), 
-            "eval/hepg2_values_baseline": hepg2_values_baseline.median(),
+            "eval/hepg2_values_ours": np.median(hepg2_values_ours), 
+            "eval/hepg2_values_baseline": np.median(hepg2_values_baseline),
             "eval/searched_div": searched_div,
             "eval/searched_atac": searched_atac,
             "eval/searched_mer_corr": searched_mer_corr,
@@ -269,8 +269,6 @@ if __name__ == '__main__':
                         help="save model start epoch", required=False)
     parser.add_argument('--save_interval_epoch', type=int, default=10,
                         help="save model epoch interval", required=False)
-    parser.add_argument('--learning_rate', type=float,
-                        default=2e-4, help="learning rate", required=False)
     parser.add_argument('--lstm_layers', type=int, default=0,
                         help="number of layers in lstm", required=False)
     parser.add_argument('--max_len', type=int, default=512,
@@ -305,16 +303,18 @@ if __name__ == '__main__':
     parser.add_argument('--dist', action='store_true',
                         default=False, help='use torch.distributed to train the model in parallel')
 
-    parser.add_argument('--epochs', type=int, default=50,
+    parser.add_argument('--epochs', type=int, default=100,
                         help="number of epochs", required=False)
-    parser.add_argument('--learning_rate', type=float, default=1e-4,
-                        help="learning rate", required=False)
+    parser.add_argument('--learning_rate', type=float,
+                        default=1e-4, help="learning rate", required=False)
     parser.add_argument('--alpha', type=float, default=0.01,
                         help="coefficient for the kl regularization", required=False)
     parser.add_argument('--gamma', type=float, default=1.0,
                         help="coefficient for the discount factor", required=False)
     parser.add_argument('--tweedie',type=str,  default = True, help='gradient guidance', required=True)
     parser.add_argument("--training_batch_size", type=int, default=64, help="batch division", required=False)
+    parser.add_argument("--inner_epochs", type=int, default=1, help="inner epochs", required=False)
+    parser.add_argument("--tag", type=str, default="", help="tag", required=False)
 
     args = parser.parse_args()
 

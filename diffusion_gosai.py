@@ -1578,7 +1578,7 @@ class Diffusion(L.LightningModule):
     for i in range(repeats): 
       expected_x0 = self.forward(samples[i], sigma_s) # Calcualte E[x_0|x_t] ## 로짓이 계산되어 나온다.
       expected_x0_arg = torch.argmax(expected_x0,dim=2) ## 로짓을 통해서 x_0을 categorical 로 샘플링한다. (이부분에서 gumbel softmax를 사용해야 할 것이다.)
-      expected_x0_onehot = torch.nn.functional.one_hot(expected_x0_arg) ## categorical을 one-hot으로 변환한다.
+      expected_x0_onehot = torch.nn.functional.one_hot(expected_x0_arg, num_classes=4) ## categorical을 one-hot으로 변환한다.
       copy_next_flag = (samples[i] != self.mask_index).to(x.dtype)
       expected_x0_onehot = copy_next_flag[:, :, None] * torch.nn.functional.one_hot(samples[i])[:, :, 0:4] + (1 - copy_next_flag[:, :, None]) * expected_x0_onehot  
       if task == "rna_saluki":
