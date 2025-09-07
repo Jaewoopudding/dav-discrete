@@ -24,7 +24,6 @@ from functools import partial
 from trainer import Trainer, TrainerConfig
 from dataset import DNA_reg_Dataset, SimpleDNATokenizer, DNA_reg_conv_Dataset
 from Enformer import BaseModel, BaseModelMultiSep, ConvHead, EnformerTrunk, TimedEnformerTrunk
-from oracle import DNAQualityAssessor
 
 import wandb 
 
@@ -54,9 +53,9 @@ def run(args, rank=None):
     set_seed(args.seed)
     args_dict = vars(args)
     wandb.init(
-        project="DNA-optimization-baseline",
+        project="DNA-optimization",
         job_type='FA',
-        name=f'decode_DPS_{args.seed}',
+        name='decode',
         # track hyperparameters and run metadata
         config=args_dict
     )
@@ -108,12 +107,8 @@ def run(args, rank=None):
     model.cuda()
     model.train()
     #model.eval()
-    
-    evaluator = DNAQualityAssessor()
 
     gen_samples, value_func_preds, reward_model_preds, selected_baseline_preds, baseline_preds = model.controlled_decode_DPS(gen_batch_num=args.val_batch_num, sample_M=args.sample_M, guidance_scale = args.guidance_scale )
-    
-    div, atac, mer_corr = evaluator.evaluate(gen_samples)
 
     hepg2_values_ours_value_func = value_func_preds.cpu().numpy()
 
@@ -122,9 +117,6 @@ def run(args, rank=None):
     hepg2_values_baseline = baseline_preds.cpu().numpy()
     print(hepg2_values_baseline.shape)
     np.savez( "./log/%s-%s_DPS" %(args.task, args.reward_name), decoding = hepg2_values_ours, baseline = hepg2_values_baseline)
-    
-    # wandb logging
-    wandb.log({"diversity": div, "atac": atac, "mer_corr": mer_corr})
 
 
     wandb.finish()
