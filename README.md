@@ -12,13 +12,13 @@ We will make molecule/protein generation part publicaly available soon. The algo
 `CUDA_VISIBLE_DEVICES=7 python finetune.py --load_checkpoint_path artifacts/DNA_value:v0/human_enhancer_diffusion_enformer_7_11_1536_16_ep10_it3500.pt --task dna --sample_M 10 --tweedie True --seed 0`
 
 
-'CUDA_VISIBLE_DEVICES=2 python decode_TDS.py --load_checkpoint_path artifacts/DNA_value:v0/human_enhancer_diffusion_enformer_7_11_1536_16_ep10_it3500.pt --task dna --sample_M 10 --seed 0'
+`CUDA_VISIBLE_DEVICES=2 python decode_TDS.py --load_checkpoint_path artifacts/DNA_value:v0/human_enhancer_diffusion_enformer_7_11_1536_16_ep10_it3500.pt --task dna --sample_M 10 --seed 0`
 
 
-'CUDA_VISIBLE_DEVICES=2 python decode_DPS.py --load_checkpoint_path artifacts/DNA_value:v0/human_enhancer_diffusion_enformer_7_11_1536_16_ep10_it3500.pt --task dna --sample_M 10 --seed 0'
+`CUDA_VISIBLE_DEVICES=2 python decode_DPS.py --load_checkpoint_path artifacts/DNA_value:v0/human_enhancer_diffusion_enformer_7_11_1536_16_ep10_it3500.pt --task dna --sample_M 10 --seed 0`
 
 
-'CUDA_VISIBLE_DEVICES=2 python decode_classfier.py --load_checkpoint_path artifacts/DNA_value:v0/human_enhancer_diffusion_enformer_7_11_1536_16_ep10_it3500.pt --task dna --guidance_scale 2 --seed 0'
+`CUDA_VISIBLE_DEVICES=2 python decode_classfier.py --load_checkpoint_path artifacts/DNA_value:v0/human_enhancer_diffusion_enformer_7_11_1536_16_ep10_it3500.pt --task dna --guidance_scale 2 --seed 0`
 
 
 ## Design of Enhancers 
