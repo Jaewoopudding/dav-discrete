@@ -125,7 +125,7 @@ def run(args, rank=None):
     np.savez( "./log/%s-%s-classfier" %(args.task, args.reward_name), decoding = hepg2_values_ours, baseline = hepg2_values_baseline)
     
     # wandb logging
-    wandb.log({"diversity": div, "atac": atac, "mer_corr": mer_corr})
+    wandb.log({"eval/values": np.median(hepg2_values_ours), "eval/diversity": div, "eval/atac": atac, "eval/mer_corr": mer_corr})
     wandb.finish()
 
     
