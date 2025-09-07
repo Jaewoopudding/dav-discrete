@@ -519,7 +519,7 @@ class BaseModel(nn.Module):
         reward_model_preds = []
         for i in range(gen_batch_num):
             batch_samples = self.ref_model.controlled_sample_TDS(self.reward_model, alpha, eval_sp_size=self.NUM_SAMPLES_PER_BATCH, sample_M=sample_M)
-            samples.append(batch_samples)
+            samples.extend(batch_samples)
             onehot_samples = self.transform_samples(batch_samples)
             value_func_preds.extend(self.head(self.embedding(onehot_samples.float())).squeeze(2).detach())
             if self.task == "rna_saluki":
@@ -599,7 +599,7 @@ class BaseModel(nn.Module):
         reward_model_preds = []
         for i in range(gen_batch_num):
             batch_samples = self.ref_model.controlled_sample_DPS(self.reward_model, guidance_scale, eval_sp_size=self.NUM_SAMPLES_PER_BATCH, sample_M=sample_M)
-            samples.append(batch_samples)
+            samples.extend(batch_samples)
             onehot_samples = self.transform_samples(batch_samples)
             value_func_preds.extend(self.head(self.embedding(onehot_samples.float())).squeeze(2).detach())
             if self.task == "rna_saluki":
@@ -678,7 +678,7 @@ class BaseModel(nn.Module):
         reward_model_preds = []
         for i in range(gen_batch_num):
             batch_samples = self.ref_model.controlled_sample_classfier(self.embedding, self.head, eval_sp_size=self.NUM_SAMPLES_PER_BATCH, guidance_scale = guidance_scale)
-            samples.append(batch_samples)
+            samples.extend(batch_samples)
             onehot_samples = self.transform_samples(batch_samples)
             value_func_preds.extend(self.head(self.embedding(onehot_samples.float())).squeeze(2).detach())
             if self.task == "rna_saluki":
