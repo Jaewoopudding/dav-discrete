@@ -24,6 +24,7 @@ from functools import partial
 from trainer import Trainer, TrainerConfig
 from dataset import DNA_reg_Dataset, SimpleDNATokenizer, DNA_reg_conv_Dataset
 from Enformer import BaseModel, BaseModelMultiSep, ConvHead, EnformerTrunk, TimedEnformerTrunk
+from oracle import DNAQualityAssessor
 
 
 
@@ -54,9 +55,9 @@ def run(args, rank=None):
     args_dict = vars(args)
     wandb.init(
         #entity='grelu',
-        project="RNA-optimization",
+        project="DNA-optimization-baseline",
         job_type='FA',
-        name='decode',
+        name=f'decode_classifier_{args.seed}',
         # track hyperparameters and run metadata
         config=args_dict
     )
@@ -110,13 +111,21 @@ def run(args, rank=None):
         torch.backends.cudnn.enabled=False
     else:
         model.eval()
+        
+    evaulator = DNAQualityAssessor()
+    
     gen_samples, value_func_preds, reward_model_preds, selected_baseline_preds, baseline_preds = model.controlled_decode_classfier(gen_batch_num=args.val_batch_num, guidance_scale = args.guidance_scale)
+    
+    div, atac, mer_corr = evaulator.evaluate(gen_samples)
 
     hepg2_values_ours_value_func = value_func_preds.cpu().numpy()
     hepg2_values_ours = reward_model_preds.cpu().numpy()
     hepg2_values_baseline = baseline_preds.cpu().numpy()
 
     np.savez( "./log/%s-%s-classfier" %(args.task, args.reward_name), decoding = hepg2_values_ours, baseline = hepg2_values_baseline)
+    
+    # wandb logging
+    wandb.log({"eval/values": np.median(hepg2_values_ours), "eval/diversity": div, "eval/atac": atac, "eval/mer_corr": mer_corr})
     wandb.finish()
 
     
