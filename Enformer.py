@@ -688,7 +688,10 @@ class BaseModel(nn.Module):
         samples = []
         value_func_preds = []
         reward_model_preds = []
+        eval_reward_model_preds = []
+        
         for i in range(gen_batch_num):
+            # self.reward_model only for guidance
             batch_samples = self.ref_model.controlled_sample_classfier(self.embedding, self.head, eval_sp_size=self.NUM_SAMPLES_PER_BATCH, guidance_scale = guidance_scale)
             samples.extend(batch_samples)
             onehot_samples = self.transform_samples(batch_samples)
@@ -696,15 +699,21 @@ class BaseModel(nn.Module):
             if self.task == "rna_saluki":
                 pred = self.reward_model(self.transform_samples_saluki(batch_samples).float()).detach().squeeze(2)
             elif self.n_tasks==1:
-                pred = self.reward_model(onehot_samples.float().transpose(1, 2)).detach()[:, 0]
+                # self.eval_reward_model for all evaluation
+                # pred = self.reward_model(onehot_samples.float().transpose(1, 2)).detach()[:, 0]
+                pred = self.eval_reward_model(onehot_samples.float().transpose(1, 2)).detach()[:, 0]
             else:
-                pred = self.reward_model(onehot_samples.float().transpose(1, 2)).detach()
+                # pred = self.reward_model(onehot_samples.float().transpose(1, 2)).detach()
+                pred = self.eval_reward_model(onehot_samples.float().transpose(1, 2)).detach()
             reward_model_preds.extend(pred)
+            eval_pred = self.eval_reward_model(onehot_samples.float().transpose(1, 2)).detach()[:, 0]
+            eval_reward_model_preds.extend(eval_pred)
 
         print("Value-weighted sampling done.")
         # baseline_samples = []
         baseline_preds = []
         all_preds = []
+        eval_base_reward_model_preds = []
         for i in range(gen_batch_num* sample_M):
             batch = self.ref_model.decode_sample(eval_sp_size=self.NUM_SAMPLES_PER_BATCH)
             onehot_samples = self.transform_samples(batch)
@@ -717,6 +726,8 @@ class BaseModel(nn.Module):
             if i < gen_batch_num:
                 baseline_preds.extend(pred)
             all_preds.extend(pred)
+            eval_base_pred = self.eval_reward_model(onehot_samples.float().transpose(1,2)).detach()[:,0]
+            eval_base_reward_model_preds.extend(eval_base_pred)
 
         print("Baseline sampling done.")
 
@@ -726,7 +737,8 @@ class BaseModel(nn.Module):
         # Get the top k values
         top_k_values, _ = torch.topk(all_values, k)
 
-        return samples, torch.cat(value_func_preds), torch.cat(reward_model_preds), top_k_values, torch.cat(baseline_preds)
+        # return samples, torch.cat(value_func_preds), torch.cat(reward_model_preds), top_k_values, torch.cat(baseline_preds)
+        return samples, torch.cat(value_func_preds), torch.cat(reward_model_preds), top_k_values, torch.cat(baseline_preds), torch.cat(eval_reward_model_preds), torch.cat(eval_base_reward_model_preds)
     
     
     @torch.no_grad()
@@ -845,8 +857,10 @@ class BaseModel(nn.Module):
             if self.task == "rna_saluki":
                 pred = self.reward_model(self.transform_samples_saluki(batch_samples).float()).detach().squeeze(2)
             elif self.n_tasks==1:
+                print("1")
                 pred = self.reward_model(onehot_samples.float().transpose(1, 2)).detach()[:, 0]
             else:
+                print("2")
                 pred = self.reward_model(onehot_samples.float().transpose(1, 2)).detach()
             reward_model_preds.extend(pred)
             eval_pred = self.eval_reward_model(onehot_samples.float().transpose(1, 2)).detach()[:, 0]
