@@ -54,7 +54,7 @@ def run(args, rank=None):
     set_seed(args.seed)
     args_dict = vars(args)
     wandb.init(
-        project="DNA-optimization-baseline",
+        project="DAV-DNA-optimization-baseline",
         job_type='FA',
         name=f'decode_TDS_{args.seed}',
         # track hyperparameters and run metadata
@@ -109,16 +109,19 @@ def run(args, rank=None):
     model.eval()
     
     evaluator = DNAQualityAssessor()
+    model.set_double_reward_model()
 
-    gen_samples, value_func_preds, reward_model_preds, selected_baseline_preds, baseline_preds = model.controlled_decode_TDS(gen_batch_num=args.val_batch_num, sample_M=args.sample_M, alpha = args.alpha )
+    gen_samples, value_func_preds, reward_model_preds, selected_baseline_preds, baseline_preds, eval_reward_model_preds, eval_base_reward_model_preds = model.controlled_decode_TDS(gen_batch_num=args.val_batch_num, sample_M=args.sample_M, alpha = args.alpha )
     
     div, atac, mer_corr = evaluator.evaluate(gen_samples)   
 
     hepg2_values_ours_value_func = value_func_preds.cpu().numpy()
 
-    hepg2_values_ours = reward_model_preds.cpu().numpy()
-    hepg2_values_selected = selected_baseline_preds.cpu().numpy()
-    hepg2_values_baseline = baseline_preds.cpu().numpy()
+    # hepg2_values_ours = reward_model_preds.cpu().numpy()
+    hepg2_values_ours = eval_reward_model_preds.cpu().numpy()
+    # hepg2_values_selected = selected_baseline_preds.cpu().numpy()
+    # hepg2_values_baseline = baseline_preds.cpu().numpy()
+    hepg2_values_baseline = eval_base_reward_model_preds.cpu().numpy()
     print(hepg2_values_baseline.shape)
     np.savez( "./log/%s-%s_TDS" %(args.task, args.reward_name), decoding = hepg2_values_ours, baseline = hepg2_values_baseline)
 

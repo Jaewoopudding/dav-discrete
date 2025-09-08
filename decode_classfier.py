@@ -55,7 +55,7 @@ def run(args, rank=None):
     args_dict = vars(args)
     wandb.init(
         #entity='grelu',
-        project="DNA-optimization-baseline",
+        project="DAV-DNA-optimization-baseline",
         job_type='FA',
         name=f'decode_classifier_{args.seed}',
         # track hyperparameters and run metadata
