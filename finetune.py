@@ -59,11 +59,11 @@ def run(args, rank=None):
     assert args.batch_size % args.training_batch_size == 0
     set_seed(args.seed)
     args_dict = vars(args)
+    exp_name = f'grad:{args.tweedie}-α:{args.alpha}-γ:{args.gamma}-M:{args.sample_M}-I:{args.inner_epochs}-B:{args.training_batch_size}/{args.batch_size}-S:{args.seed}-{args.tag}'
     wandb.init(
         project="DAV-DNA-optimization",
         job_type='FA',
-        name=f'grad:{args.tweedie}-α:{args.alpha}-γ:{args.gamma}-M:{args.sample_M}-B:{args.training_batch_size}/{args.batch_size}-S:{args.seed}-{args.tag}',
-        # track hyperparameters and run metadata
+        name=exp_name,
         config=args_dict
     )
     # os.environ["WANDB_MODE"] = "dryrun"
@@ -134,6 +134,7 @@ def run(args, rank=None):
 
     for epoch in tqdm(range(args.epochs), desc="Training epochs: ", position=0):
         model.ref_model.eval()
+        model.set_batch_size(args.batch_size)
         gen_samples, zero_shot_gen_samples, value_func_preds, reward_model_preds, eval_reward_model_preds, selected_baseline_preds, baseline_preds, eval_base_reward_model_preds, q_xs_history, x_history, q_x0_history = model.controlled_decode_rl(
             gen_batch_num=args.val_batch_num, 
             sample_M=args.sample_M, 
@@ -164,14 +165,21 @@ def run(args, rank=None):
         print(f"==== eval : hepg2_values_baseline: {np.median(eval_hepg2_values_baseline)}")
 
         for inner_epoch in range(args.inner_epochs):
+            # 매 inner epoch마다 배치 차원에서 랜덤하게 섞기
+            batch_size = q_xs_history.shape[1]
+            shuffle_indices = torch.randperm(batch_size, device=q_xs_history.device)
+            q_xs_shuffled = q_xs_history[:, shuffle_indices]
+            q_x0_shuffled = q_x0_history[:, shuffle_indices]
+            x_shuffled = x_history[:, shuffle_indices]
+            
             for i in trange(division, desc=f"Policy Training Divisions (batch_size={len(gen_samples)//division})"):
                 loss = 0.0  # float으로 초기화
                 policy_optimizer.zero_grad()
                 # kl_loss = 0.0
                 train_batch_size = len(gen_samples) // division
-                q_xs_train = q_xs_history[: ,i*train_batch_size:(i+1)*train_batch_size]
-                q_x0_train = q_x0_history[: ,i*train_batch_size:(i+1)*train_batch_size]
-                x_train = x_history[: ,i*train_batch_size:(i+1)*train_batch_size]
+                q_xs_train = q_xs_shuffled[: ,i*train_batch_size:(i+1)*train_batch_size]
+                q_x0_train = q_x0_shuffled[: ,i*train_batch_size:(i+1)*train_batch_size]
+                x_train = x_shuffled[: ,i*train_batch_size:(i+1)*train_batch_size]
 
                 for enum, (q_xs, q_x0, x, t) in tqdm(enumerate(zip(q_xs_train, q_x0_train, x_train, timesteps[:-1])), total=q_xs_train.shape[0], desc=f"Division {i+1}/{division} - Timesteps", leave=False):
                     sigma_t, _ = model.ref_model.noise(t * torch.ones(x.shape[0], device=x.device))
@@ -200,8 +208,7 @@ def run(args, rank=None):
                     policy_optimizer.step()
                     policy_optimizer.zero_grad()
 
-
-        wandb.log({
+        log_dict = {
             "reward/hepg2_values_searched": np.median(hepg2_values_ours), 
             "reward/hepg2_values_baseline": np.median(hepg2_values_baseline),
             "reward/eval_hepg2_values_searched": np.median(eval_hepg2_values_ours),
@@ -214,7 +221,45 @@ def run(args, rank=None):
             "mer_corr/base_mer_corr": base_mer_corr,
             "loss/policy_loss": loss.item(),
             "epoch": epoch
-        })
+        }
+
+        if (epoch + 1) % 50 == 0:
+            model.set_batch_size(args.eval_batch_size)
+            gen_samples, zero_shot_gen_samples, value_func_preds, reward_model_preds, eval_reward_model_preds, selected_baseline_preds, baseline_preds, eval_base_reward_model_preds, q_xs_history, x_history, q_x0_history = model.controlled_decode_rl(
+                gen_batch_num=3, 
+                sample_M=args.sample_M, 
+                options = args.tweedie,
+                alpha = args.alpha,
+                gamma = args.gamma
+            ) 
+            searched_div, searched_atac, searched_mer_corr = evaluator.evaluate(gen_samples)
+            base_div, base_atac, base_mer_corr = evaluator.evaluate(zero_shot_gen_samples)
+            log_dict.update({
+                "result/searched_div": searched_div,
+                "result/searched_atac": searched_atac,
+                "result/searched_mer_corr": searched_mer_corr,
+                "result/base_div": base_div,
+                "result/base_atac": base_atac,
+                "result/base_mer_corr": base_mer_corr,
+                "result/hepg2_values_searched": np.median(hepg2_values_ours),
+                "result/hepg2_values_baseline": np.median(hepg2_values_baseline),
+                "result/eval_hepg2_values_searched": np.median(eval_hepg2_values_ours),
+                "result/eval_hepg2_values_baseline": np.median(eval_hepg2_values_baseline)
+            })
+
+        if (epoch + 1) % 50 == 0:
+            checkpoint = {
+                'model_state_dict': model.state_dict(),
+                'policy_optimizer_state_dict': policy_optimizer.state_dict(),
+                'epoch': epoch,
+                'args': vars(args)
+            }
+            checkpoint_path = f"./checkpoints/{exp_name}/finetune_epoch_{epoch+1}.pt"
+            os.makedirs("./checkpoints", exist_ok=True)
+            torch.save(checkpoint, checkpoint_path)
+            print(f"Checkpoint saved: {checkpoint_path}")
+
+        wandb.log(log_dict)
 
 
         
@@ -325,6 +370,7 @@ if __name__ == '__main__':
     parser.add_argument("--training_batch_size", type=int, default=64, help="batch division", required=False)
     parser.add_argument("--inner_epochs", type=int, default=1, help="inner epochs", required=False)
     parser.add_argument("--tag", type=str, default="", help="tag", required=False)
+    parser.add_argument("--eval_batch_size", type=int, default=640, help="eval batch size", required=False)
 
     args = parser.parse_args()
 

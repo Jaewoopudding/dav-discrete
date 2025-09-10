@@ -1587,7 +1587,13 @@ class Diffusion(L.LightningModule):
       expected_x0_arg = torch.argmax(expected_x0,dim=2)
       expected_x0_onehot = torch.nn.functional.one_hot(expected_x0_arg, num_classes=4)
       copy_next_flag = (samples[i] != self.mask_index).to(x.dtype)
-      expected_x0_onehot = copy_next_flag[:, :, None] * torch.nn.functional.one_hot(samples[i])[:, :, 0:4] + (1 - copy_next_flag[:, :, None]) * expected_x0_onehot  
+      one_hot_samples = torch.nn.functional.one_hot(samples[i])
+      if one_hot_samples.shape[-1] < 4:
+        padding_size = 4 - one_hot_samples.shape[-1]
+        padding = torch.zeros(one_hot_samples.shape[0], one_hot_samples.shape[1], padding_size, device=one_hot_samples.device, dtype=one_hot_samples.dtype)
+        one_hot_samples = torch.cat((one_hot_samples, padding), dim=-1)
+      
+      expected_x0_onehot = copy_next_flag[:, :, None] * one_hot_samples[:, :, 0:4] + (1 - copy_next_flag[:, :, None]) * expected_x0_onehot  
       if task == "rna_saluki":
         scorer = reward_model(self.transform_samples_saluki(expected_x0_onehot).float()).detach().squeeze(2)
       else:

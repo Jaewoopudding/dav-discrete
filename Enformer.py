@@ -267,6 +267,9 @@ class BaseModel(nn.Module):
 
         return loss
 
+    def set_batch_size(self, batch_size):
+        self.NUM_SAMPLES_PER_BATCH = batch_size
+
     def set_double_reward_model(self):
         self.reward_model = LightningModel.load_from_checkpoint("artifacts/Pred_acc_oracle/reward_oracle_ft.ckpt", map_location='cpu')
         self.eval_reward_model = LightningModel.load_from_checkpoint("artifacts/Pred_acc_oracle/reward_oracle_eval.ckpt", map_location='cpu')
@@ -855,8 +858,7 @@ class BaseModel(nn.Module):
         # baseline_samples = []
         baseline_preds = []
         eval_base_reward_model_preds = []
-        all_preds = []
-        for i in range(gen_batch_num*sample_M):
+        for i in range(gen_batch_num):
             batch = self.ref_model.decode_sample(eval_sp_size=self.NUM_SAMPLES_PER_BATCH)
             onehot_samples = self.transform_samples(batch)
             if self.task == "rna_saluki":
@@ -876,9 +878,7 @@ class BaseModel(nn.Module):
               
                 pred = self.reward_model(onehot_samples.float().transpose(1, 2)).detach()[:, 0] +  torch.log(torch.clamp(reward_pes1,min= 1e-40) ) + torch.log(torch.clamp(reward_pes2,min= 1e-40) ) 
                 '''
-            if i < gen_batch_num:
-                baseline_preds.extend(pred)
-            all_preds.extend(pred)
+            baseline_preds.extend(pred)
             eval_base_pred = self.eval_reward_model(onehot_samples.float().transpose(1, 2)).detach()[:, 0]
             eval_base_reward_model_preds.extend(eval_base_pred)
 
