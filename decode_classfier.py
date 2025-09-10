@@ -55,7 +55,7 @@ def run(args, rank=None):
     args_dict = vars(args)
     wandb.init(
         #entity='grelu',
-        project="DNA-optimization-baseline",
+        project="DAV-DNA-optimization-baseline",
         job_type='FA',
         name=f'decode_classifier_{args.seed}',
         # track hyperparameters and run metadata
@@ -113,14 +113,17 @@ def run(args, rank=None):
         model.eval()
         
     evaulator = DNAQualityAssessor()
+    model.set_double_reward_model()
     
-    gen_samples, value_func_preds, reward_model_preds, selected_baseline_preds, baseline_preds = model.controlled_decode_classfier(gen_batch_num=args.val_batch_num, guidance_scale = args.guidance_scale)
+    gen_samples, value_func_preds, reward_model_preds, selected_baseline_preds, baseline_preds, eval_reward_model_preds, eval_base_reward_model_preds = model.controlled_decode_classfier(gen_batch_num=args.val_batch_num, guidance_scale = args.guidance_scale)
     
     div, atac, mer_corr = evaulator.evaluate(gen_samples)
 
     hepg2_values_ours_value_func = value_func_preds.cpu().numpy()
-    hepg2_values_ours = reward_model_preds.cpu().numpy()
-    hepg2_values_baseline = baseline_preds.cpu().numpy()
+    # hepg2_values_ours = reward_model_preds.cpu().numpy()
+    hepg2_values_ours = eval_reward_model_preds.cpu().numpy()
+    # hepg2_values_baseline = baseline_preds.cpu().numpy()
+    hepg2_values_baseline = eval_base_reward_model_preds.cpu().numpy()
 
     np.savez( "./log/%s-%s-classfier" %(args.task, args.reward_name), decoding = hepg2_values_ours, baseline = hepg2_values_baseline)
     
