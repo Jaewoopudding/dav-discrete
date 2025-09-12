@@ -23,6 +23,7 @@ from tqdm import tqdm, trange
 import copy
 import warnings
 import oracle
+import gc  
 warnings.filterwarnings("ignore")
 
 # from roberta_regression import RobertaForRegression, BertForSequenceClassification
@@ -59,9 +60,9 @@ def run(args, rank=None):
     assert args.batch_size % args.training_batch_size == 0
     set_seed(args.seed)
     args_dict = vars(args)
-    exp_name = f'grad:{args.tweedie}-α:{args.alpha}-γ:{args.gamma}-M:{args.sample_M}-I:{args.inner_epochs}-B:{args.training_batch_size}/{args.batch_size}-S:{args.seed}-{args.tag}'
+    exp_name = f'grad:{args.tweedie}-α:{args.alpha}-γ:{args.gamma}-M:{args.sample_M}-I:{args.inner_epochs}-B:{args.training_batch_size}-{args.batch_size}-S:{args.seed}-{args.tag}'
     wandb.init(
-        project="DAV-DNA-optimization",
+        project="DAV-DNA",
         job_type='FA',
         name=exp_name,
         config=args_dict
@@ -224,14 +225,33 @@ def run(args, rank=None):
         }
 
         if (epoch + 1) % 50 == 0:
+            checkpoint = {
+                'model_state_dict': model.state_dict(),
+                'policy_optimizer_state_dict': policy_optimizer.state_dict(),
+                'epoch': epoch,
+                'args': vars(args)
+            }
+            checkpoint_path = f"./checkpoints/{exp_name}/finetune_epoch_{epoch+1}.pt"
+            os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
+            torch.save(checkpoint, checkpoint_path)
+            print(f"Checkpoint saved: {checkpoint_path}")
+
+
+        if (epoch + 1) % 50 == 0:
             model.set_batch_size(args.eval_batch_size)
             gen_samples, zero_shot_gen_samples, value_func_preds, reward_model_preds, eval_reward_model_preds, selected_baseline_preds, baseline_preds, eval_base_reward_model_preds, q_xs_history, x_history, q_x0_history = model.controlled_decode_rl(
-                gen_batch_num=3, 
+                gen_batch_num = args.val_batch_num, 
                 sample_M=args.sample_M, 
                 options = args.tweedie,
                 alpha = args.alpha,
                 gamma = args.gamma
             ) 
+            del loss
+            del q_xs_history
+            del q_x0_history
+            del x_history 
+            gc.collect()
+
             searched_div, searched_atac, searched_mer_corr = evaluator.evaluate(gen_samples)
             base_div, base_atac, base_mer_corr = evaluator.evaluate(zero_shot_gen_samples)
             log_dict.update({
@@ -246,18 +266,6 @@ def run(args, rank=None):
                 "result/eval_hepg2_values_searched": np.median(eval_hepg2_values_ours),
                 "result/eval_hepg2_values_baseline": np.median(eval_hepg2_values_baseline)
             })
-
-        if (epoch + 1) % 50 == 0:
-            checkpoint = {
-                'model_state_dict': model.state_dict(),
-                'policy_optimizer_state_dict': policy_optimizer.state_dict(),
-                'epoch': epoch,
-                'args': vars(args)
-            }
-            checkpoint_path = f"./checkpoints/{exp_name}/finetune_epoch_{epoch+1}.pt"
-            os.makedirs("./checkpoints", exist_ok=True)
-            torch.save(checkpoint, checkpoint_path)
-            print(f"Checkpoint saved: {checkpoint_path}")
 
         wandb.log(log_dict)
 
@@ -358,7 +366,7 @@ if __name__ == '__main__':
     parser.add_argument('--dist', action='store_true',
                         default=False, help='use torch.distributed to train the model in parallel')
 
-    parser.add_argument('--epochs', type=int, default=100,
+    parser.add_argument('--epochs', type=int, default=50,
                         help="number of epochs", required=False)
     parser.add_argument('--learning_rate', type=float,
                         default=1e-4, help="learning rate", required=False)
