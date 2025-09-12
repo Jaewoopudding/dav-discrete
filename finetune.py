@@ -176,33 +176,52 @@ def run(args, rank=None):
             for i in trange(division, desc=f"Policy Training Divisions (batch_size={len(gen_samples)//division})"):
                 loss = 0.0  # float으로 초기화
                 policy_optimizer.zero_grad()
-                # kl_loss = 0.0
+                kl_loss = 0.0
                 train_batch_size = len(gen_samples) // division
                 q_xs_train = q_xs_shuffled[: ,i*train_batch_size:(i+1)*train_batch_size]
                 q_x0_train = q_x0_shuffled[: ,i*train_batch_size:(i+1)*train_batch_size]
                 x_train = x_shuffled[: ,i*train_batch_size:(i+1)*train_batch_size]
 
                 for enum, (q_xs, q_x0, x, t) in tqdm(enumerate(zip(q_xs_train, q_x0_train, x_train, timesteps[:-1])), total=q_xs_train.shape[0], desc=f"Division {i+1}/{division} - Timesteps", leave=False):
+                    # MLE loss
+                    # min - (\pi_theta(x_{t-1}|x_t)))
                     sigma_t, _ = model.ref_model.noise(t * torch.ones(x.shape[0], device=x.device))
                     sigma_s, _ = model.ref_model.noise((t - dt) * torch.ones(x.shape[0], device=x.device))
                     move_chance_t = (1 - torch.exp(-sigma_t))[:, None, None]
                     move_chance_s = (1 - torch.exp(-sigma_s))[:, None, None]
+                    # negativity
                     weight = - (move_chance_t - move_chance_s) / (1 - move_chance_t)
 
                     copy_flag = (x != model.ref_model.mask_index).to(x.dtype)
                     logits = model.ref_model.backbone(x, sigma_t)
                     log_probs = model.ref_model._subs_parameterization(logits=logits, xt=x)
-                    log_probs = torch.gather(log_probs, -1, torch.argmax(q_x0, dim=-1, keepdim=True)).squeeze(-1)
-                    loss += copy_flag * weight * log_probs.mean()
+                    log_probs_selected = torch.gather(log_probs, -1, torch.argmax(q_x0, dim=-1, keepdim=True)).squeeze(-1)
+                    
+                    loss += copy_flag * weight * log_probs_selected.mean()
 
-                    # logits_pretrained = pretrained_model.backbone(x, sigma_t)
-                    # log_probs_pretrained = pretrained_model._subs_parameterization(logits=logits_pretrained, xt=x)
-                    # log_probs_pretrained = torch.gather(log_probs_pretrained, -1, torch.argmax(q_x0, dim=-1, keepdim=True)).squeeze(-1)
-                    # kl_div = (-log_probs.exp() + log_probs_pretrained.exp() + log_probs.exp() * (log_probs - log_probs_pretrained))
-                    # kl_loss += kl_div.mean()
+                    # KL divergence loss 
+                    # min D_KL(\pi_theta(x_{t-1}|x_t) || \pi_pretrained(x_{t-1}|x_t))
+                    with torch.no_grad():
+                        logits_pretrained = pretrained_model.backbone(x, sigma_t)
+                        log_probs_pretrained = pretrained_model._subs_parameterization(logits=logits_pretrained, xt=x)
+                    log_p_theta = log_probs  # [batch, seq, vocab] (including mask token)
+                    log_p_pretrained = log_probs_pretrained
+                    
+                    p_theta = log_p_theta.exp()
+                    p_pretrained = log_p_pretrained.exp()
+                    # 0 for unmasked positions, 1 for masked positions
+                    mask_flag = (1 - copy_flag) 
+                    mask_flag_expanded = mask_flag[:, :, None].expand_as(p_theta)
+                    
+                    # KL divergence: D_KL(p_theta || p_pretrained) = sum(p_theta * (log_p_theta - log_p_pretrained))
+                    kl_per_token = p_theta * (log_p_theta - log_p_pretrained)
+                    kl_masked = mask_flag_expanded * kl_per_token  # Only compute for masked positions
+                    kl_loss += kl_masked.sum(dim=(1, 2)).mean()  # Sum over seq and vocab, then mean over batch
 
                 loss = loss.mean()
-                loss.backward()
+                kl_loss = kl_loss.mean()
+                total_loss = loss + kl_loss * args.alpha
+                total_loss.backward()
 
                 if (i + 1) * samples_per_division % args.training_batch_size == 0:
                     torch.nn.utils.clip_grad_norm_(model.ref_model.parameters(), max_norm=1.0)
@@ -220,7 +239,9 @@ def run(args, rank=None):
             "div/base_div": base_div,
             "atac/base_atac": base_atac,
             "mer_corr/base_mer_corr": base_mer_corr,
+            "loss/total_loss": total_loss.item(),
             "loss/policy_loss": loss.item(),
+            "loss/kl_loss": kl_loss.item(),
             "epoch": epoch
         }
 
@@ -379,6 +400,8 @@ if __name__ == '__main__':
     parser.add_argument("--inner_epochs", type=int, default=1, help="inner epochs", required=False)
     parser.add_argument("--tag", type=str, default="", help="tag", required=False)
     parser.add_argument("--eval_batch_size", type=int, default=640, help="eval batch size", required=False)
+    parser.add_argument('--use_kl', action='store_true',
+                        default=False, help='use kl divergence loss')
 
     args = parser.parse_args()
 
