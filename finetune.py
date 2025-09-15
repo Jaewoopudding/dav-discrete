@@ -196,32 +196,16 @@ def run(args, rank=None):
                     logits = model.ref_model.backbone(x, sigma_t)
                     log_probs = model.ref_model._subs_parameterization(logits=logits, xt=x)
                     log_probs_selected = torch.gather(log_probs, -1, torch.argmax(q_x0, dim=-1, keepdim=True)).squeeze(-1)
-                    
-                    loss += copy_flag * weight * log_probs_selected.mean()
-
-                    # KL divergence loss 
-                    # min D_KL(\pi_theta(x_{t-1}|x_t) || \pi_pretrained(x_{t-1}|x_t))
-                    with torch.no_grad():
-                        logits_pretrained = pretrained_model.backbone(x, sigma_t)
-                        log_probs_pretrained = pretrained_model._subs_parameterization(logits=logits_pretrained, xt=x)
-                    log_p_theta = log_probs  # [batch, seq, vocab] (including mask token)
-                    log_p_pretrained = log_probs_pretrained
-                    
-                    p_theta = log_p_theta.exp()
-                    p_pretrained = log_p_pretrained.exp()
-                    # 0 for unmasked positions, 1 for masked positions
-                    mask_flag = (1 - copy_flag) 
-                    mask_flag_expanded = mask_flag[:, :, None].expand_as(p_theta)
-                    
-                    # KL divergence: D_KL(p_theta || p_pretrained) = sum(p_theta * (log_p_theta - log_p_pretrained))
-                    kl_per_token = p_theta * (log_p_theta - log_p_pretrained)
-                    kl_masked = mask_flag_expanded * kl_per_token  # Only compute for masked positions
-                    kl_loss += kl_masked.sum(dim=(1, 2)).mean()  # Sum over seq and vocab, then mean over batch
-
+                    loss += ((1 - copy_flag) * weight * log_probs_selected).mean()
                 loss = loss.mean()
-                kl_loss = kl_loss.mean()
-                total_loss = loss + kl_loss * args.alpha
-                total_loss.backward()
+                loss.backward()
+
+                # if args.kl_reg_coef > 0:
+                #     total_loss = loss + kl_loss * args.kl_reg_coef
+                #     total_loss.backward()
+                # else:
+                #     total_loss = loss
+                #     total_loss.backward()
 
                 if (i + 1) * samples_per_division % args.training_batch_size == 0:
                     torch.nn.utils.clip_grad_norm_(model.ref_model.parameters(), max_norm=1.0)
@@ -239,9 +223,8 @@ def run(args, rank=None):
             "div/base_div": base_div,
             "atac/base_atac": base_atac,
             "mer_corr/base_mer_corr": base_mer_corr,
-            "loss/total_loss": total_loss.item(),
-            "loss/policy_loss": loss.item(),
-            "loss/kl_loss": kl_loss.item(),
+            # "loss/total_loss": total_loss.item(),
+            "loss/policy_loss": loss,
             "epoch": epoch
         }
 
@@ -400,8 +383,7 @@ if __name__ == '__main__':
     parser.add_argument("--inner_epochs", type=int, default=1, help="inner epochs", required=False)
     parser.add_argument("--tag", type=str, default="", help="tag", required=False)
     parser.add_argument("--eval_batch_size", type=int, default=640, help="eval batch size", required=False)
-    parser.add_argument('--use_kl', action='store_true',
-                        default=False, help='use kl divergence loss')
+    parser.add_argument('--kl_reg_coef', type=float, default=0., help='use kl divergence loss', required=False)
 
     args = parser.parse_args()
 
