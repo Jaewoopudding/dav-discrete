@@ -149,7 +149,7 @@ def run(args, rank=None):
         eval_hepg2_values_ours = eval_reward_model_preds.cpu().numpy()
         eval_hepg2_values_baseline = eval_base_reward_model_preds.cpu().numpy()
 
-        division = 32
+        division = 16
         samples_per_division = len(gen_samples) // division
 
         searched_div, searched_atac, searched_mer_corr = evaluator.evaluate(gen_samples)
@@ -185,6 +185,8 @@ def run(args, rank=None):
                 for enum, (q_xs, q_x0, x, t) in tqdm(enumerate(zip(q_xs_train, q_x0_train, x_train, timesteps[:-1])), total=q_xs_train.shape[0], desc=f"Division {i+1}/{division} - Timesteps", leave=False):
                     # MLE loss
                     # min - (\pi_theta(x_{t-1}|x_t)))
+                    if enum < args.skip_steps:
+                        continue
                     sigma_t, _ = model.ref_model.noise(t * torch.ones(x.shape[0], device=x.device))
                     sigma_s, _ = model.ref_model.noise((t - dt) * torch.ones(x.shape[0], device=x.device))
                     move_chance_t = (1 - torch.exp(-sigma_t))[:, None, None]
@@ -192,11 +194,11 @@ def run(args, rank=None):
                     # negativity
                     weight = - (move_chance_t - move_chance_s) / (1 - move_chance_t)
 
-                    copy_flag = (x != model.ref_model.mask_index).to(x.dtype)
+                    # copy_flag = (x != model.ref_model.mask_index).to(x.dtype)
                     logits = model.ref_model.backbone(x, sigma_t)
                     log_probs = model.ref_model._subs_parameterization(logits=logits, xt=x)
                     log_probs_selected = torch.gather(log_probs, -1, torch.argmax(q_x0, dim=-1, keepdim=True)).squeeze(-1)
-                    loss += ((1 - copy_flag) * weight * log_probs_selected).mean()
+                    loss += weight * log_probs_selected.mean()
                 loss = loss.mean()
                 loss.backward()
 
@@ -384,6 +386,7 @@ if __name__ == '__main__':
     parser.add_argument("--tag", type=str, default="", help="tag", required=False)
     parser.add_argument("--eval_batch_size", type=int, default=640, help="eval batch size", required=False)
     parser.add_argument('--kl_reg_coef', type=float, default=0., help='use kl divergence loss', required=False)
+    parser.add_argument('--skip_steps', type=int, default=0, help='skip steps', required=False)
 
     args = parser.parse_args()
 
