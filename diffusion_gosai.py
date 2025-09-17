@@ -307,24 +307,36 @@ class Diffusion(L.LightningModule):
         self.backbone.parameters(),
         self.noise.parameters()))
 
-  def _subs_parameterization(self, logits, xt):
-    # log prob at the mask index = - infinity
-    # print(logits.shape, xt.shape) # [128, 200, 5] [128, 200]
-    logits[:, :, self.mask_index] += self.neg_infinity
-    
-    # Normalize the logits such that x.exp() is
-    # a probability distribution over vocab_size.
-    logits = logits - torch.logsumexp(logits, dim=-1,
-                                      keepdim=True)
+  def _subs_parameterization(self, logits, xt, kl=False):
+    if not kl:
+      # log prob at the mask index = - infinity
+      # print(logits.shape, xt.shape) # [128, 200, 5] [128, 200]
+      logits[:, :, self.mask_index] += self.neg_infinity
+      
+      # Normalize the logits such that x.exp() is
+      # a probability distribution over vocab_size.
+      logits = logits - torch.logsumexp(logits, dim=-1,
+                                        keepdim=True)
 
-    # Apply updates directly in the logits matrix.
-    # For the logits of the unmasked tokens, set all values
-    # to -infinity except for the indices corresponding to
-    # the unmasked tokens.
-    unmasked_indices = (xt != self.mask_index)
-    # print(unmasked_indices.shape)
-    logits[unmasked_indices] = self.neg_infinity
-    logits[unmasked_indices, xt[unmasked_indices]] = 0
+      # Apply updates directly in the logits matrix.
+      # For the logits of the unmasked tokens, set all values
+      # to -infinity except for the indices corresponding to
+      # the unmasked tokens.
+      unmasked_indices = (xt != self.mask_index)
+      # print(unmasked_indices.shape)
+      logits[unmasked_indices] = self.neg_infinity
+      logits[unmasked_indices, xt[unmasked_indices]] = 0
+    else:
+      logits[:, :, self.mask_index] += self.neg_infinity
+      logits = logits - torch.logsumexp(logits, dim=-1,
+                                        keepdim=True)
+      if xt.ndim > 2 and xt.shape[-1] == self.vocab_size:
+        # this is for finetuning setting when the input is one-hot encoded or probs
+        xt = xt.argmax(dim=-1)
+      unmasked_indices = (xt != self.mask_index)
+      logits[unmasked_indices] = self.neg_infinity
+      logits[unmasked_indices, xt[unmasked_indices]] = 0
+    # return normalized logits
     return logits
 
   def _d3pm_parameterization(self, logits):
@@ -360,7 +372,7 @@ class Diffusion(L.LightningModule):
     assert sigma.ndim == 1, sigma.shape
     return sigma
 
-  def forward(self, x, sigma):
+  def forward(self, x, sigma, kl=False):
     """Returns log score."""
     # TODO: where is the sigma configed and input into the model?
     sigma = self._process_sigma(sigma)
@@ -368,10 +380,11 @@ class Diffusion(L.LightningModule):
 
     with torch.cuda.amp.autocast(dtype=torch.float32):
       logits = self.backbone(x, sigma)
-    
+      # print(logits)
     if self.parameterization == 'subs':
       return self._subs_parameterization(logits=logits,
-                                         xt=x)
+                                         xt=x,
+                                         kl=kl)
     elif self.parameterization == 'sedd':
       return self._sedd_parameterization(logits=logits,
                                          xt=x,
@@ -1174,6 +1187,7 @@ class Diffusion(L.LightningModule):
     q_xs_history = []
     q_x0_history = []
     x_history = []
+    last_x_list = []
     if eval_sp_size is None:
       batch_size_per_gpu = self.config.loader.eval_batch_size
     else:
@@ -1187,7 +1201,7 @@ class Diffusion(L.LightningModule):
       batch_size_per_gpu,
       self.config.model.length).to(self.device)
     timesteps = torch.linspace(
-      1, eps, num_steps + 1, device=self.device)
+      1, eps, num_steps + 1, device=self.device)  
     dt = (1 - eps) / num_steps
     p_x0_cache = None
 
@@ -1195,10 +1209,13 @@ class Diffusion(L.LightningModule):
       t = timesteps[i] * torch.ones(
         x.shape[0], 1, device=self.device)
       if self.sampler == 'ddpm':
+        # Here we should make difference of last_x according to time step, must be simplex sometimes
+        # 그리고 전에 forward에서 one hot으로 강제했던 코드 원상복귀해야
         x_history.append(x)
-        x, x1, q_xs, x3, predicted_x0s_of_final_samples = self._ddpm_update_finetune_controlled_rl(x, t, dt, reward_model, repeats=sample_M, options = options, task=task, alpha = alpha, gamma = gamma)
+        x, x1, q_xs, x3, predicted_x0s_of_final_samples, last_x = self._ddpm_update_finetune_controlled_rl(x, t, dt, reward_model, repeats=sample_M, options = options, task=task, alpha = alpha, gamma = gamma)
         q_x0_history.append(predicted_x0s_of_final_samples)
         q_xs_history.append(q_xs)
+        last_x_list.append(last_x)
       else:
         x = self._analytic_update(x, t, dt)
 
@@ -1209,12 +1226,14 @@ class Diffusion(L.LightningModule):
         x = self._denoiser_update(x, t)
       else:
         unet_conditioning = self.noise(t)[0]
+        # print the logits for each sequence length
         logits = self.forward(x, unet_conditioning)
         # print(logits.shape) # (batch_size, seq_len, vocab_size)
         # x=argmax of logits of the unmasked tokens
         # no issue with subs; for sedd, if not using [:, :, :-1], some samples will contain the mask token
+        # reduce the dimension by sampling index with the highest logit value
         x = logits[:, :, :-1].argmax(dim=-1)
-    return x, q_xs_history, x_history, q_x0_history
+    return x, q_xs_history, x_history, q_x0_history, last_x_list
 
   @torch.no_grad()
   def _ddpm_update_finetune(self, x, t, dt):
@@ -1537,6 +1556,7 @@ class Diffusion(L.LightningModule):
     unet_conditioning = sigma_t
 
     sigma = self._process_sigma(unet_conditioning)
+    # x가 mask가 아닌 영역에 1 할당
     copy_flag = (x != self.mask_index).to(x.dtype)
 
 
@@ -1545,9 +1565,11 @@ class Diffusion(L.LightningModule):
       
       if options == "True":
         with torch.enable_grad():
+          # add the dimension: index to vector to one-hot encoding
           x_onehot = torch.nn.functional.one_hot(x, 5).float()
           x_onehot = x_onehot.requires_grad_(True)
           one_hot_logits = self.backbone.forward2(x_onehot, sigma)
+          # return normalized logits
           log_p_x0 = self._subs_parameterization(logits=one_hot_logits, xt=x)
           p_x0 = log_p_x0.exp()
           p_x0 = copy_flag[:, :, None] * x_onehot + (1 - copy_flag[:, :, None]) * p_x0
@@ -1611,7 +1633,15 @@ class Diffusion(L.LightningModule):
     final_samples = torch.stack(final_samples, dim=0)
     predicted_x0s_of_final_samples = torch.stack([predicted_x0s[final_sample_indices[j]][j,:] for j in range(x.size(0))], dim=0)
     normalized_q_xs = q_xs / q_xs.sum(dim=-1, keepdim=True)
-    return final_samples, x, normalized_q_xs, copy_flag, predicted_x0s_of_final_samples
+
+    # # Print the final samples for debugging
+    # print(f'final_samples: {final_samples}')
+    # print(f'normalized_q_xs: {normalized_q_xs}')
+    # print(f'predicted_x0s_of_final_samples: {predicted_x0s_of_final_samples}')
+    if x.ndim == 2 or x.shape[-1] != self.vocab_size:
+      last_x = F.one_hot(x, num_classes=self.vocab_size).to(torch.float32)
+
+    return final_samples, x, normalized_q_xs, copy_flag, predicted_x0s_of_final_samples, last_x
 
   def transform_samples(self, samples, num_classes=4):
     # One-hot encode the tensor but first mask out the '4's

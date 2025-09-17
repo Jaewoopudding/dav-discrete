@@ -24,6 +24,8 @@ import copy
 import warnings
 import oracle
 import gc  
+import pdb
+import torch.nn.functional as F
 warnings.filterwarnings("ignore")
 
 # from roberta_regression import RobertaForRegression, BertForSequenceClassification
@@ -60,9 +62,10 @@ def run(args, rank=None):
     assert args.batch_size % args.training_batch_size == 0
     set_seed(args.seed)
     args_dict = vars(args)
-    exp_name = f'grad:{args.tweedie}-α:{args.alpha}-γ:{args.gamma}-M:{args.sample_M}-I:{args.inner_epochs}-B:{args.training_batch_size}-{args.batch_size}-S:{args.seed}-{args.tag}'
+    # exp_name = f'grad:{args.tweedie}-α:{args.alpha}-γ:{args.gamma}-M:{args.sample_M}-I:{args.inner_epochs}-B:{args.training_batch_size}-{args.batch_size}-S:{args.seed}-{args.tag}'
+    exp_name = f'preTrained_eval{args.val_batch_num}_inner{args.inner_epochs}_klreg{args.kl_reg_coef}_skip{args.skip_steps}_epc{args.epochs}_lr{args.learning_rate}_seed{args.seed}'
     wandb.init(
-        project="DAV-DNA",
+        project="DAV-DNA_song",
         job_type='FA',
         name=exp_name,
         config=args_dict
@@ -136,7 +139,7 @@ def run(args, rank=None):
     for epoch in tqdm(range(args.epochs), desc="Training epochs: ", position=0):
         model.ref_model.eval()
         model.set_batch_size(args.batch_size)
-        gen_samples, zero_shot_gen_samples, value_func_preds, reward_model_preds, eval_reward_model_preds, selected_baseline_preds, baseline_preds, eval_base_reward_model_preds, q_xs_history, x_history, q_x0_history = model.controlled_decode_rl(
+        gen_samples, zero_shot_gen_samples, value_func_preds, reward_model_preds, eval_reward_model_preds, selected_baseline_preds, baseline_preds, eval_base_reward_model_preds, q_xs_history, x_history, q_x0_history, last_x_list = model.controlled_decode_rl(
             gen_batch_num=args.val_batch_num, 
             sample_M=args.sample_M, 
             options = args.tweedie,
@@ -149,8 +152,11 @@ def run(args, rank=None):
         eval_hepg2_values_ours = eval_reward_model_preds.cpu().numpy()
         eval_hepg2_values_baseline = eval_base_reward_model_preds.cpu().numpy()
 
-        division = 32
+        # division = 32
+        division = 16
+        # lend(gen_samples)=256
         samples_per_division = len(gen_samples) // division
+        print(f"Samples per division: {samples_per_division}, Total samples: {len(gen_samples)}")
 
         searched_div, searched_atac, searched_mer_corr = evaluator.evaluate(gen_samples)
         base_div, base_atac, base_mer_corr = evaluator.evaluate(zero_shot_gen_samples)
@@ -159,6 +165,7 @@ def run(args, rank=None):
         q_xs_history = torch.stack(q_xs_history)  
         q_x0_history = torch.stack(q_x0_history) 
         x_history = torch.stack(x_history)  
+        last_x_list = torch.stack(last_x_list)
 
         print(f"==== train: hepg2_values_ours: {np.median(hepg2_values_ours)}")
         print(f"==== train: hepg2_values_baseline: {np.median(hepg2_values_baseline)}")
@@ -172,7 +179,8 @@ def run(args, rank=None):
             q_xs_shuffled = q_xs_history[:, shuffle_indices]
             q_x0_shuffled = q_x0_history[:, shuffle_indices]
             x_shuffled = x_history[:, shuffle_indices]
-            
+            last_x_shuffled = last_x_list[:, shuffle_indices]
+
             for i in trange(division, desc=f"Policy Training Divisions (batch_size={len(gen_samples)//division})"):
                 loss = 0.0  # float으로 초기화
                 policy_optimizer.zero_grad()
@@ -181,36 +189,99 @@ def run(args, rank=None):
                 q_xs_train = q_xs_shuffled[: ,i*train_batch_size:(i+1)*train_batch_size]
                 q_x0_train = q_x0_shuffled[: ,i*train_batch_size:(i+1)*train_batch_size]
                 x_train = x_shuffled[: ,i*train_batch_size:(i+1)*train_batch_size]
+                last_x_train = last_x_shuffled[:, i*train_batch_size:(i+1)*train_batch_size]
 
-                for enum, (q_xs, q_x0, x, t) in tqdm(enumerate(zip(q_xs_train, q_x0_train, x_train, timesteps[:-1])), total=q_xs_train.shape[0], desc=f"Division {i+1}/{division} - Timesteps", leave=False):
+                for enum, (q_xs, q_x0, x, t, last_x) in tqdm(enumerate(zip(q_xs_train, q_x0_train, x_train, timesteps[:-1], last_x_train)), total=q_xs_train.shape[0], desc=f"Division {i+1}/{division} - Timesteps", leave=False):
                     # MLE loss
                     # min - (\pi_theta(x_{t-1}|x_t)))
+                    # x = F.one_hot(x,num_classes=model.ref_model.vocab_size).to(torch.float32)
+                    if enum < args.skip_steps:
+                        continue
                     sigma_t, _ = model.ref_model.noise(t * torch.ones(x.shape[0], device=x.device))
                     sigma_s, _ = model.ref_model.noise((t - dt) * torch.ones(x.shape[0], device=x.device))
                     move_chance_t = (1 - torch.exp(-sigma_t))[:, None, None]
                     move_chance_s = (1 - torch.exp(-sigma_s))[:, None, None]
                     # negativity
                     weight = - (move_chance_t - move_chance_s) / (1 - move_chance_t)
-
-                    copy_flag = (x != model.ref_model.mask_index).to(x.dtype)
+                    weight = weight.mean()
+                    # weight = weight.mean()
+                    # copy_flag = (x != model.ref_model.mask_index).to(x.dtype)
                     logits = model.ref_model.backbone(x, sigma_t)
                     log_probs = model.ref_model._subs_parameterization(logits=logits, xt=x)
                     log_probs_selected = torch.gather(log_probs, -1, torch.argmax(q_x0, dim=-1, keepdim=True)).squeeze(-1)
-                    loss += ((1 - copy_flag) * weight * log_probs_selected).mean()
-                loss = loss.mean()
-                loss.backward()
+                    # loss += (((1 - copy_flag) * weight * log_probs_selected).sum(dim=(1))).mean()
+                    loss += weight * log_probs_selected.mean()
 
-                # if args.kl_reg_coef > 0:
-                #     total_loss = loss + kl_loss * args.kl_reg_coef
-                #     total_loss.backward()
-                # else:
-                #     total_loss = loss
-                #     total_loss.backward()
+                # loss = loss / q_xs_train.shape[0]
+                # loss.backward()
+                
+                    # if args.kl_reg_coef > 0 and enum >= 80:
+                    if args.kl_reg_coef > 0:
+                        # x = F.one_hot(x, num_classes=model.ref_model.vocab_size).to(torch.float32)
+                        # x = x.long()
+                        # pdb.set_trace()
+                        # KL divergence loss
+                        with torch.no_grad():
+                            # logits_pretrained = pretrained_model.backbone(x,sigma_t)
+                            # log_probs_pretrained = pretrained_model._subs_parameterization(logits=logits_pretrained, xt=x)[:,:,:-1]
+                            # log_probs_pretrained=pretrained_model.forward(x, sigma_t)[:,:,:-1]
+                            # logits_pretrained = pretrained_model.backbone(x, sigma_t)
+                            # log_p_pretrained = pretrained_model._subs_parameterization(logits=logits_pretrained, xt=x)[:,:,:-1]
+                            log_p_pretrained = pretrained_model.forward(last_x,sigma_t,kl=True)[:,:,:-1]
+                        # log_p_theta = log_probs[:,:,:-1]
+                        # log_p_theta = model.ref_model.forward(x, sigma_t)[:,:,:-1]
+                        # logits_p_theta = model.ref_model.backbone(x, sigma_t, kl=True)
+                        # log_p_theta = model.ref_model._subs_parameterization(logits=logits_p_theta, xt=x)[:,:,:-1]
+                        log_p_theta = model.ref_model.forward(last_x, sigma_t, kl=True)[:,:,:-1]
+                        
+                        p_theta = log_p_theta.exp()
+                        p_pretrained = log_p_pretrained.exp()
+                        
+                        # copy_flag_expanded = copy_flag[:,:,None]
+                        # x는 [batch, seq] 형태의 토큰 인덱스 텐서이므로 3차원 인덱싱 불가
+                        # mask_positions = (x == model.ref_model.mask_index).float()  # [batch, seq]
+                        # soft_copy_flag = (1-mask_positions).unsqueeze(-1)  # [batch, seq, 1]
+                        # pdb.set_trace()
+                        # if enum < 80:
+                        #     # print('enum is less than 80')
+                        #     # from [8,200,4] to [8,200,1]
+                        #     copy_flag = (x != model.ref_model.mask_index).to(x.dtype)[:,:,0:1]
+                        # else:
+                        #     # print('enum is bigger than 80')
+                        copy_flag = 1 - last_x[:, :, model.ref_model.mask_index].unsqueeze(-1)
 
+                        # soft_copy_flag = 1- x[:,:,model.ref_model.mask_index].unsqueeze(-1)
+                        # pdb.set_trace()
+                        # kl_div = (copy_flag * (-p_theta + p_pretrained + p_theta * (log_p_theta - log_p_pretrained))) / move_chance_t.mean()
+                        kl_div = copy_flag * (-p_theta + p_pretrained + p_theta * (log_p_theta - log_p_pretrained)) / move_chance_t.mean()
+                        # kl_div와 x의 shape 확인
+                        # if epoch == 2:
+                        #     pdb.set_trace()
+                        # x는 2차원이므로 직접 sum 사용
+                        # kl_div = kl_div.sum(dim=(1,2))  # soft_copy_flag가 이미 마스킹 역할
+                        kl_div = (kl_div * last_x[:,:,:-1]).sum(dim=(1,2))
+                        # print(f'kl_div: {kl_div}')
+                        # print(f'last_x[:,:,:-1]: {last_x[:,:,:-1]}')
+                        kl_loss += kl_div.mean()  # soft_copy_flag가 이미 마스킹 역할
+                        # kl_loss += kl_div.mean()
+                        # pdb.set_trace()
+
+                if args.kl_reg_coef > 0:
+                    total_loss = (loss + kl_loss * args.kl_reg_coef) / (enum + 1)
+                    # pdb.set_trace()
+                    total_loss.backward()
+                    print(f'Division {i+1}/{division}, MLE Loss: {loss.item():.4f}, KL Loss: {kl_loss.item():.4f}, Total Loss: {total_loss.item():.6f}')
+                else:
+                    total_loss = loss / (enum + 1)
+                    total_loss.backward()
+
+                # i=0-15,samples_per_division=16, training_batch_size=64
                 if (i + 1) * samples_per_division % args.training_batch_size == 0:
+                    print("Updating policy network..., it's M-step")
                     torch.nn.utils.clip_grad_norm_(model.ref_model.parameters(), max_norm=1.0)
                     policy_optimizer.step()
                     policy_optimizer.zero_grad()
+                    # pdb.set_trace()
 
         log_dict = {
             "reward/hepg2_values_searched": np.median(hepg2_values_ours), 
@@ -223,8 +294,9 @@ def run(args, rank=None):
             "div/base_div": base_div,
             "atac/base_atac": base_atac,
             "mer_corr/base_mer_corr": base_mer_corr,
-            # "loss/total_loss": total_loss.item(),
-            "loss/policy_loss": loss,
+            "loss/total_loss": total_loss.item(),
+            "loss/policy_loss": (loss/(enum+1)).item(),
+            "loss/kl_loss": (kl_loss/(enum+1)).item() if args.kl_reg_coef > 0 else 0.0,
             "epoch": epoch
         }
 
@@ -253,7 +325,7 @@ def run(args, rank=None):
             del loss
             del q_xs_history
             del q_x0_history
-            del x_history 
+            del x_history
             gc.collect()
 
             searched_div, searched_atac, searched_mer_corr = evaluator.evaluate(gen_samples)
@@ -272,9 +344,6 @@ def run(args, rank=None):
             })
 
         wandb.log(log_dict)
-
-
-        
 
 
         np.savez( "./log/%s-%s_tw" %(args.task, args.reward_name), decoding = hepg2_values_ours, baseline = hepg2_values_baseline)
@@ -384,6 +453,8 @@ if __name__ == '__main__':
     parser.add_argument("--tag", type=str, default="", help="tag", required=False)
     parser.add_argument("--eval_batch_size", type=int, default=640, help="eval batch size", required=False)
     parser.add_argument('--kl_reg_coef', type=float, default=0., help='use kl divergence loss', required=False)
+    parser.add_argument('--skip_steps', type=int, default=0, help='skip steps', required=False)
+    
 
     args = parser.parse_args()
 

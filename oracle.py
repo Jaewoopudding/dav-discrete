@@ -298,7 +298,8 @@ def cal_atac_pred_new(seqs, model=None):
     seqs: list of sequences (detokenized ACGT...) or tokenized tensor
     """
     if model is None:
-        model = LightningModel.load_from_checkpoint(os.path.join('/home/jaewoo/research/SVDD/artifacts/ATAC_oracle/binary_atac_cell_lines.ckpt'), map_location='cuda')
+        model = LightningModel.load_from_checkpoint(os.path.join('/home/son9ih/dav-discrete/artifacts/ATAC_oracle/binary_atac_cell_lines.ckpt'), map_location='cuda')
+    # model.cuda()/
     model.eval()
     
     if isinstance(seqs, list):
@@ -308,6 +309,7 @@ def cal_atac_pred_new(seqs, model=None):
 
     tokens = tokens.long().cuda()
     onehot_tokens = torch.nn.functional.one_hot(tokens, num_classes=4).float()
+    # error
     preds = model(onehot_tokens.float().transpose(1, 2)).detach().cpu().numpy()
     return (preds > 0.5).mean().item()
 
@@ -329,7 +331,7 @@ class DNAQualityAssessor:
         self.atac_acc = cal_atac_pred_new
         self.mer_corr = compare_kmer
 
-        self.atac_model = LightningModel.load_from_checkpoint(os.path.join('/home/jaewoo/research/SVDD/artifacts/ATAC_oracle/binary_atac_cell_lines.ckpt'), map_location='cuda')
+        self.atac_model = LightningModel.load_from_checkpoint(os.path.join('/home/son9ih/dav-discrete/artifacts/ATAC_oracle/binary_atac_cell_lines.ckpt'), map_location='cuda')
         _, _, self.highexp_kmers_999, self.n_highexp_kmers_999 = cal_highexp_kmers(k=3, return_clss=False)
 
     def evaluate(self, seqs):

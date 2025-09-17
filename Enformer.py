@@ -875,7 +875,7 @@ class BaseModel(nn.Module):
         reward_model_preds = []
         eval_reward_model_preds = []
         for i in trange(gen_batch_num, desc="Generating samples", position=1, leave=False):
-            batch_samples, q_xs_history, x_history, q_x0_history = self.ref_model.controlled_sample_rl(
+            batch_samples, q_xs_history, x_history, q_x0_history, last_x_list = self.ref_model.controlled_sample_rl(
                 self.reward_model, eval_sp_size=self.NUM_SAMPLES_PER_BATCH, sample_M=sample_M, options = options, task=self.task, alpha = alpha, gamma = gamma
             )
             samples.extend(batch_samples)
@@ -929,7 +929,7 @@ class BaseModel(nn.Module):
         top_k_values, _ = torch.topk(all_values, k)
         '''
 
-        return samples, batch, torch.cat(value_func_preds), torch.cat(reward_model_preds), torch.cat(eval_reward_model_preds), top_k_values, torch.cat(baseline_preds), torch.cat(eval_base_reward_model_preds), q_xs_history, x_history, q_x0_history
+        return samples, batch, torch.cat(value_func_preds), torch.cat(reward_model_preds), torch.cat(eval_reward_model_preds), top_k_values, torch.cat(baseline_preds), torch.cat(eval_base_reward_model_preds), q_xs_history, x_history, q_x0_history, last_x_list
 
     def configure_optimizers(self, train_config):
         # separate out all parameters to those that will and won't experience regularizing weight decay

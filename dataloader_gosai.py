@@ -84,7 +84,7 @@ class DNASequenceDetokenizer:
 
 class GosaiDataset(torch.utils.data.Dataset):
     def __init__(self, split='train'):
-        data_df = pd.read_csv('/home/jaewoo/research/SVDD/data/dataset.csv')
+        data_df = pd.read_csv('/home/son9ih/dav-discrete/data/dataset.csv')
         self.seqs = torch.tensor(data_df['seq'].apply(lambda x: [DNA_ALPHABET[c] for c in x]).tolist())
         self.clss = torch.tensor(data_df[['hepg2', 'k562', 'sknsh']].to_numpy())
         LOGGER.info(f'Loaded {split} data: seqs shape: {self.seqs.shape}, clss shape: {self.clss.shape}')
