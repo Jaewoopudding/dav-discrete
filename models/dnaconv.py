@@ -174,7 +174,10 @@ class CNNModel(nn.Module):
             self.cls_layers = nn.ModuleList([Dense(args.hidden_dim, args.hidden_dim) for _ in range(self.num_layers)])
     
     def forward(self, seq, t, cls = None, return_embedding=False):
-        seq = F.one_hot(seq, num_classes=self.alphabet_size).float()
+        # seq = F.one_hot(seq, num_classes=self.alphabet_size).float()
+        if not (seq.ndim > 2 and seq.shape[-1] == self.alphabet_size):
+            seq = F.one_hot(seq, num_classes=self.alphabet_size).float()
+            # print('1')
         if self.args.clean_data:
             feat = self.linear(seq)
             feat = feat.permute(0, 2, 1)

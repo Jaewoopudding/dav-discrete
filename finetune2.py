@@ -36,6 +36,10 @@ from oracle import DNAQualityAssessor
 
 import wandb 
 
+from models_sgdd.sedd import SEDD
+from problem.dna import DNA
+from sampling.sgdd import SGDD
+
 
 def set_seed(seed):
     random.seed(seed)
@@ -117,6 +121,31 @@ def run(args, rank=None):
 
     model.cuda()
     model.eval()
+    
+    # load SEDD diffusion model
+    model_sgdd_path = 'checkpoints_sgdd/dna_uniform'
+    model_sgdd = SEDD(model_sgdd_path)
+    
+    
+    # load forward operator
+    forward_op = DNA()
+    
+    
+    # load algorithm
+    algorithm = SGDD(model_sgdd, forward_op, alpha=args.alpha_sgdd)
+    
+    gen_samples, zero_shot_gen_samples, value_func_preds, reward_model_preds, eval_reward_model_preds, 
+    selected_baseline_preds, baseline_preds, eval_base_reward_model_preds, q_xs_history, x_history,
+    q_x0_history, last_x_list = algorithm.inference(observation=torch.torch.zeros(batch_size), num_samples=batch_size)
+    
+    
+    
+    
+    
+    
+    
+    
+    
 
     timesteps = torch.linspace(1, 1e-5, model.ref_model.config.sampling.steps + 1)
     dt = (1 - 1e-5) / model.ref_model.config.sampling.steps
