@@ -187,6 +187,9 @@ class Diffusion(L.LightningModule):
     self.fast_forward_batches = None
     self._validate_configuration()
 
+    # truncated steps setting
+    self.truncated_steps = None
+
     # subset of data for evaluation
   
     # self.eval_sets_sp = oracle.subset_for_eval(n=config.eval.subset_size) # train_set_sp, valid_set_sp, test_set_sp
@@ -809,7 +812,7 @@ class Diffusion(L.LightningModule):
     copy_flag = (x != self.mask_index).to(x.dtype)
     return p_x0, copy_flag * x + (1 - copy_flag) * _x
 
-  def _ddpm_update(self, x, t, dt):
+  def _ddpm_update(self, x, t, dt, return_process=False):
     sigma_t, _ = self.noise(t)
     sigma_s, _ = self.noise(t - dt)
     if sigma_t.ndim > 1:
@@ -834,8 +837,11 @@ class Diffusion(L.LightningModule):
     _x = _sample_categorical(q_xs)
     aaa = self.mask_index 
     copy_flag = (x != self.mask_index).to(x.dtype)
-    return copy_flag * x + (1 - copy_flag) * _x
-  
+    if return_process:
+      return copy_flag * x + (1 - copy_flag) * _x, x, unet_conditioning, move_chance_t, copy_flag
+    else:
+      return copy_flag * x + (1 - copy_flag) * _x
+
   def _ar_sampler(self, bsz):
     # precompute token buffer
     num_pred_tokens = self.config.model.length - 1
@@ -1212,9 +1218,11 @@ class Diffusion(L.LightningModule):
         # Here we should make difference of last_x according to time step, must be simplex sometimes
         # 그리고 전에 forward에서 one hot으로 강제했던 코드 원상복귀해야
         x_history.append(x)
-        x, x1, q_xs, x3, predicted_x0s_of_final_samples, last_x = self._ddpm_update_finetune_controlled_rl(x, t, dt, reward_model, repeats=sample_M, options = options, task=task, alpha = alpha, gamma = gamma)
+        x, x1, q_xs, x3, predicted_x0s_of_final_samples, last_x = self._ddpm_update_finetune_controlled_rl(
+          x, t, dt, reward_model, repeats=sample_M, options=options, task=task, alpha=alpha, gamma=gamma, i=i, num_steps=num_steps)
         q_x0_history.append(predicted_x0s_of_final_samples)
         q_xs_history.append(q_xs)
+        # print(f'last_x: {last_x} in timestep {i}')
         last_x_list.append(last_x)
       else:
         x = self._analytic_update(x, t, dt)
@@ -1234,6 +1242,49 @@ class Diffusion(L.LightningModule):
         # reduce the dimension by sampling index with the highest logit value
         x = logits[:, :, :-1].argmax(dim=-1)
     return x, q_xs_history, x_history, q_x0_history, last_x_list
+  
+  def _ddpm_update_finetune_gradient(self, x, t, dt, copy_flag_temp, return_process=False):
+    
+    if x.ndim == 2 or x.shape[-1] != self.vocab_size:
+      x = F.one_hot(x, num_classes=self.vocab_size).to(torch.float32)
+
+    sigma_t, _ = self.noise(t)
+    sigma_s, _ = self.noise(t - dt)
+    if sigma_t.ndim > 1:
+      sigma_t = sigma_t.squeeze(-1)
+    if sigma_s.ndim > 1:
+      sigma_s = sigma_s.squeeze(-1)
+    assert sigma_t.ndim == 1, sigma_t.shape
+    assert sigma_s.ndim == 1, sigma_s.shape
+    move_chance_t = 1 - torch.exp(-sigma_t) # (1-eps)*t
+    move_chance_s = 1 - torch.exp(-sigma_s)
+    move_chance_t = move_chance_t[:, None, None]
+    move_chance_s = move_chance_s[:, None, None]
+    unet_conditioning = sigma_t
+    log_p_x0 = self.forward(x, unet_conditioning)
+    assert move_chance_t.ndim == log_p_x0.ndim
+    q_xs = log_p_x0.exp() * (move_chance_t
+                             - move_chance_s)
+    q_xs[:, :, self.mask_index] = move_chance_s[:, :, 0]
+    _x = self._sample_categorical_gradient(q_xs)
+    
+    if copy_flag_temp is not None:
+      copy_flag_prob = 1 - x[:, :, self.mask_index].unsqueeze(-1)
+      soft_copy_flag = torch.nn.functional.sigmoid(copy_flag_prob/copy_flag_temp)
+    else:
+      soft_copy_flag = 1 - x[:, :, self.mask_index].unsqueeze(-1)
+
+    if return_process:
+      return soft_copy_flag * x + (1 - soft_copy_flag) * _x, x, unet_conditioning, move_chance_t, soft_copy_flag
+    else:
+      return soft_copy_flag * x + (1 - soft_copy_flag) * _x
+    
+  def _sample_categorical_gradient(categorical_probs, temp = 1.0):
+    gumbel_norm = (
+      1e-10
+      - (torch.rand_like(categorical_probs) + 1e-10).log())
+    output = torch.nn.functional.softmax((torch.log(categorical_probs)-torch.log(gumbel_norm))/temp, 2)
+    return output
 
   @torch.no_grad()
   def _ddpm_update_finetune(self, x, t, dt):
@@ -1537,7 +1588,7 @@ class Diffusion(L.LightningModule):
     return final_samples, x, q_xs, copy_flag
 
   @torch.no_grad()
-  def _ddpm_update_finetune_controlled_rl(self, x, t, dt, reward_model, repeats=10, options = "True", task="dna", alpha = 1.0, gamma = 1.0):
+  def _ddpm_update_finetune_controlled_rl(self, x, t, dt, reward_model, repeats=10, options = "True", task="dna", alpha = 1.0, gamma = 1.0, i: int = None, num_steps: int = None):
     total_steps = self.config.sampling.steps
     current_timestep_idx = total_steps - int(torch.round((1 - t) / dt)[0])
 
@@ -1604,12 +1655,12 @@ class Diffusion(L.LightningModule):
 
     scores = []
     predicted_x0s = []
-    for i in range(repeats): 
-      expected_x0 = self.forward(samples[i], sigma_s)
+    for r in range(repeats): 
+      expected_x0 = self.forward(samples[r], sigma_s)
       expected_x0_arg = torch.argmax(expected_x0,dim=2)
       expected_x0_onehot = torch.nn.functional.one_hot(expected_x0_arg, num_classes=4)
-      copy_next_flag = (samples[i] != self.mask_index).to(x.dtype)
-      one_hot_samples = torch.nn.functional.one_hot(samples[i])
+      copy_next_flag = (samples[r] != self.mask_index).to(x.dtype)
+      one_hot_samples = torch.nn.functional.one_hot(samples[r])
       if one_hot_samples.shape[-1] < 4:
         padding_size = 4 - one_hot_samples.shape[-1]
         padding = torch.zeros(one_hot_samples.shape[0], one_hot_samples.shape[1], padding_size, device=one_hot_samples.device, dtype=one_hot_samples.dtype)
@@ -1634,11 +1685,20 @@ class Diffusion(L.LightningModule):
     predicted_x0s_of_final_samples = torch.stack([predicted_x0s[final_sample_indices[j]][j,:] for j in range(x.size(0))], dim=0)
     normalized_q_xs = q_xs / q_xs.sum(dim=-1, keepdim=True)
 
-    # # Print the final samples for debugging
-    # print(f'final_samples: {final_samples}')
-    # print(f'normalized_q_xs: {normalized_q_xs}')
-    # print(f'predicted_x0s_of_final_samples: {predicted_x0s_of_final_samples}')
-    if x.ndim == 2 or x.shape[-1] != self.vocab_size:
+    # Compute last_x for logging based on iteration index
+    if num_steps is not None and i is not None:
+      threshold = max(0, num_steps - self.truncated_steps)
+      if i < threshold:
+        # Early timesteps: one-hot of input x
+        last_x = F.one_hot(x, num_classes=self.vocab_size).to(torch.float32)
+      else:
+        # Late timesteps: use soft_copy_flag mixing between x (one-hot) and q_xs distribution
+        x_onehot = F.one_hot(x, num_classes=self.vocab_size).to(torch.float32)
+        # soft_copy_flag = 1 for non-mask positions, 0 for mask positions
+        soft_copy_flag = 1 - x_onehot[:, :, self.mask_index].unsqueeze(-1)
+        last_x = soft_copy_flag * x_onehot + (1 - soft_copy_flag) * normalized_q_xs
+    else:
+      # Fallback if indices not provided
       last_x = F.one_hot(x, num_classes=self.vocab_size).to(torch.float32)
 
     return final_samples, x, normalized_q_xs, copy_flag, predicted_x0s_of_final_samples, last_x
