@@ -1,6 +1,6 @@
 from .base import DiscreteDiffusion
 from .SEDD.load_model import load_model
-from ldm.util import instantiate_from_config
+# from ldm.util import instantiate_from_config
 
 import torch
 import torch.nn.functional as F

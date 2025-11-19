@@ -12,7 +12,7 @@ def sample_categorical(categorical_probs, method="hard"):
         raise ValueError(f"Method {method} for sampling categorical variables is not valid.")
     
 
-from models.SEDD import utils as mutils
+from models_sgdd.SEDD import utils as mutils
 
 _PREDICTORS = {}
 

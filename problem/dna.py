@@ -5,7 +5,7 @@ from grelu.lightning import LightningModel
 from applications.drakes_dna.oracle import get_gosai_oracle
 
 class DNA(BaseOperator):
-    def __init__(self, model, sigma_noise=0.01, length = 200, device='cuda'):
+    def __init__(self, sigma_noise=0.01, length = 200, device='cuda'):
         super().__init__(sigma_noise, device)
         self.length = length
         # reward_model = LightningModel.load_from_checkpoint(model, map_location='cpu').to(device)
