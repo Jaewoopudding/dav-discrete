@@ -200,6 +200,95 @@ class Diffusion(L.LightningModule):
     # self.emb_pca = oracle.cal_emb_pca(dataloader_gosai.get_datasets_gosai(skip_train=True)[1], n_components=50, oracle_model=ORACLE_MODEL)
     # self.eval_sets_sp_embs_pca = oracle.subset_eval_embs_pca(self.eval_sets_sp, self.emb_pca, ORACLE_MODEL) # train_sp_emb_pca, valid_sp_emb_pca, test_sp_emb_pca
     
+    # Add graph property for SGDD compatibility
+    self._init_graph()
+  
+  def _init_graph(self):
+    """Initialize graph structure for SGDD compatibility."""
+    from models_sgdd.SEDD.graph_lib import Uniform, Absorbing
+    # Create a simple uniform graph with vocab_size - 1 (excluding mask token)
+    # self.graph = Uniform(dim=self.vocab_size - 1)  # 4 for DNA (A, C, G, T)
+    self.graph = Absorbing(dim=self.vocab_size - 1)  # 4 for DNA (A, C, G, T)
+  
+  @property
+  def length(self):
+    """Return the sequence length for SGDD compatibility."""
+    # print(self.config.model.length)
+    return self.config.model.length
+    # return 200
+  
+  def score(self, x, sigma):
+    """
+    Compute the score for SGDD compatibility - SEDD style.
+    This method returns log score (NOT log probability distribution).
+    
+    CRITICAL: SEDD's score is different from DAV's parameterization:
+    - SEDD: raw log score with current token position zeroed (for score matching)
+    - DAV subs: normalized log probs with unmasked positions zeroed (for MLE)
+    
+    Args:
+      x: input tensor of shape [batch, seq_len]
+      sigma: noise level, can be a scalar or tensor
+      
+    Returns:
+      score: log score [batch, seq_len, vocab_size] with x[..., None] positions set to 0
+    """
+    # Process sigma
+    sigma = self._process_sigma(sigma)
+    
+    # Get raw logits from backbone
+    with torch.cuda.amp.autocast(dtype=torch.float32):
+      logits = self.backbone(x, sigma)
+    
+    # Apply SEDD-style parameterization (matching official SEDD implementation)
+    # Note: even if self.parameterization == 'subs', we use SEDD style for SGDD
+    if hasattr(self.config, 'model') and hasattr(self.config.model, 'scale_by_sigma') and self.config.model.scale_by_sigma:
+      # Scale by sigma like SEDD does
+      esigm1_log = torch.where(
+        sigma < 0.5,
+        torch.expm1(sigma),
+        sigma.exp() - 1
+      ).log().to(logits.dtype)[:, None, None]
+      logits = logits - esigm1_log - np.log(logits.shape[-1] - 1)
+    
+    # Set current token position to 0 (SEDD behavior)
+    # This is DIFFERENT from _subs_parameterization which sets unmasked to 0
+    score = torch.scatter(logits, -1, x[..., None], torch.zeros_like(logits[..., :1]))
+    
+    return score
+  
+  def pred_mean(self, x, t):
+    """
+    Predict the mean for the next step (SGDD compatibility).
+    
+    Args:
+      x: current state [batch, seq_len]
+      t: time step
+      
+    Returns:
+      predicted next state
+    """
+    from models_sgdd.sedd import sample_categorical
+    
+    sigma, dsigma = self.noise(t)
+    score = self.score(x, sigma)
+    
+    stag_score = self.graph.staggered_score(score, sigma)
+    probs = stag_score * self.graph.transp_transition(x, sigma)
+    return sample_categorical(probs)
+  
+  def get_start(self, batch_size):
+    """
+    Get initial random state for SGDD sampling.
+    
+    Args:
+      batch_size: number of samples
+      
+    Returns:
+      random initial state
+    """
+    return self.graph.sample_limit((batch_size, self.length)).to(self.device)
+    
   def _validate_configuration(self):
     assert not (self.change_of_variables
                 and self.importance_sampling)

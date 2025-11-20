@@ -5,6 +5,7 @@ import tqdm
 import numpy as np
 from .sampling_utils import get_pc_sampler
 import os
+import pdb
 
 class SGDD(Algo):
     """
@@ -26,7 +27,8 @@ class SGDD(Algo):
         # self.model = self.net.model
         self.graph = self.net.graph
         self.noise = self.net.noise
-        self.uncond_sampler = get_pc_sampler(self.graph, self.noise, (1,1024), 'analytic', ode_steps , device=device)
+        # self.uncond_sampler = get_pc_sampler(self.graph, self.noise, (1,1024), 'analytic', ode_steps , device=device)
+        self.uncond_sampler = get_pc_sampler(self.graph, self.noise, (1,self.net.length), 'analytic', ode_steps , device=device)
         self.device = device
         self.num_steps = num_steps
         self.sigma_fn = lambda t: t
@@ -63,6 +65,7 @@ class SGDD(Algo):
         x = x0hat.clone()
         dim = self.graph._dim
         N, L = x0hat.shape[0], x0hat.shape[1]
+        # 여기서 log likelihood 계산
         current_log_likelihood = op.log_likelihood(x, y)
         current_hm_dist = (x != x0hat).sum(dim=-1)
         for _ in range(steps):
@@ -129,6 +132,7 @@ class SGDD(Algo):
             x_history.append(xt.clone())
 
             # 1. reverse diffusion
+            # pdb.set_trace()
             x0hat = self.uncond_sampler(self.net, xt, t_start=self.time_steps[i])
             x0hats.append(x0hat.clone())
             
@@ -137,6 +141,7 @@ class SGDD(Algo):
             if self.cf:
                 x0y = self.forward_op.cf_sample(x0hat, observation, sigma*self.alpha)
             else:
+                # print(f'observation: {observation}')
                 x0y = self.metropolis_hasting(x0hat, self.forward_op, observation, sigma*self.alpha, steps=self.mh_steps)
             xt = x0y
             xts.append(xt.clone())

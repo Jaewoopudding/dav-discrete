@@ -271,6 +271,7 @@ class BaseModel(nn.Module):
         self.NUM_SAMPLES_PER_BATCH = batch_size
 
     def set_double_reward_model(self):
+        # 'mdlm/outputs_gosai/lightning_logs/reward_oracle_ft.ckpt'
         self.reward_model = LightningModel.load_from_checkpoint("artifacts/Pred_acc_oracle/reward_oracle_ft.ckpt", map_location='cpu')
         self.eval_reward_model = LightningModel.load_from_checkpoint("artifacts/Pred_acc_oracle/reward_oracle_eval.ckpt", map_location='cpu')
         self.reward_model.cuda()

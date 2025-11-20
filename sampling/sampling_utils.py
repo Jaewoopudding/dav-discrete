@@ -128,6 +128,7 @@ def get_sampling_fn(config, graph, noise, batch_dims, eps, device):
     return sampling_fn
     
 
+# self.uncond_sampler = get_pc_sampler(self.graph, self.noise, (1,self.net.length), 'analytic', ode_steps , device=device)
 def get_pc_sampler(graph, noise, batch_dims, predictor, steps, denoise=True, eps=1e-5, device=torch.device('cpu'), proj_fun=lambda x: x):
     predictor = get_predictor(predictor)(graph, noise)
     projector = proj_fun

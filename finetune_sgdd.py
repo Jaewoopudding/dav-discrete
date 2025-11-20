@@ -164,7 +164,7 @@ def run(args, rank=None):
         model.set_batch_size(args.batch_size)
         # gen_samples, zero_shot_gen_samples, value_func_preds, reward_model_preds, eval_reward_model_preds, selected_baseline_preds, baseline_preds, eval_base_reward_model_preds, q_xs_history, x_history, q_x0_history, last_x_list = model.controlled_decode_rl(
         #     gen_batch_num=args.val_batch_num,
-        #     sample_M=args.sample_M, 
+        #     sample_M=args.sample_M,
         #     options = args.tweedie,
         #     alpha = args.alpha,
         #     gamma = args.gamma
@@ -179,9 +179,9 @@ def run(args, rank=None):
         #         eval_reward_model=model.eval_reward_model
         #     )
 
-
         gen_samples, zero_shot_gen_samples, value_func_preds, reward_model_preds, eval_reward_model_preds, selected_baseline_preds, baseline_preds, eval_base_reward_model_preds, q_xs_history, x_history, q_x0_history, last_x_list = algorithm.inference(
-            observation=torch.zeros(args.batch_size_sgdd), 
+            # observation=torch.zeros(args.batch_size_sgdd), 
+            observation=torch.zeros(args.batch_size_sgdd),
             num_samples=args.batch_size_sgdd,
             reward_model=model.reward_model,
             eval_reward_model=model.eval_reward_model
