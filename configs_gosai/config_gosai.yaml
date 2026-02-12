@@ -109,3 +109,9 @@ checkpointing:
   # Note: `checkpoints` path should correspond to `checkpoint_every_n_steps.dirpath`
   resume_from_ckpt: true
   resume_ckpt_path: ${.save_dir}/checkpoints/last.ckpt
+
+finetuning:
+  truncate_steps: 3
+
+  model:
+  length: 200

@@ -63,7 +63,7 @@ def run(args, rank=None):
     set_seed(args.seed)
     args_dict = vars(args)
     # exp_name = f'grad:{args.tweedie}-α:{args.alpha}-γ:{args.gamma}-M:{args.sample_M}-I:{args.inner_epochs}-B:{args.training_batch_size}-{args.batch_size}-S:{args.seed}-{args.tag}'
-    exp_name = f'preTrained_tweedie{args.tweedie}_alpha{args.alpha}_eval{args.eval_batch_size}_inner{args.inner_epochs}_klreg{args.kl_reg_coef}_skip{args.skip_steps}_trun{args.truncated_steps}_epc{args.epochs}_lr{args.learning_rate}_seed{args.seed}'
+    exp_name = f'preTrained_tweedie{args.tweedie}_sample_M{args.sample_M}_alpha{args.alpha}_eval{args.eval_batch_size}_inner{args.inner_epochs}_klreg{args.kl_reg_coef}_skip{args.skip_steps}_trun{args.truncated_steps}_epc{args.epochs}_lr{args.learning_rate}_seed{args.seed}'
     wandb.init(
         project="DAV-DNA_song",
         job_type='FA',

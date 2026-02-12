@@ -1,0 +1,69 @@
+defaults:
+  - _self_
+
+work_dir: results/mpra_uniform
+
+ngpus: 1
+tokens: 4
+
+training:
+  batch_size: 32
+  accum: 1
+  n_iters: 1000001
+  snapshot_freq: 100000
+  log_freq: 50
+  eval_freq: 100
+  snapshot_freq_for_preemption: 100000
+  weight: standard
+  snapshot_sampling: True
+  ema: 0.9999
+
+model:
+  name: small
+  hidden_size: 768
+  cond_dim: 128
+  length: 200
+  n_blocks: 12
+  n_heads: 12
+  scale_by_sigma: False
+  dropout: 0.1
+
+data:
+  train: mpra
+  valid: mpra
+  cache_dir: data
+
+graph:
+  type: uniform
+  file: data
+  report_all: False
+
+noise:
+  type: geometric
+  sigma_min: 1e-4
+  sigma_max: 20
+
+sampling:
+  predictor: euler
+  steps: 128
+  noise_removal: True
+
+eval:
+  batch_size: 512
+  perplexity: False
+  perplexity_batch_size: 32
+
+optim:
+  weight_decay: 0
+  optimizer: AdamW
+  lr: 3e-4
+  beta1: 0.9
+  beta2: 0.999
+  eps: 1e-8
+  warmup: 2500
+  grad_clip: 1.
+
+wandb:
+  project: mpra
+  name: uniform
+  active: True
