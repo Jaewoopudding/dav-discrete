@@ -465,7 +465,7 @@ if __name__ == '__main__':
     parser.add_argument("--tag", type=str, default="", help="tag", required=False)
     parser.add_argument("--eval_batch_size", type=int, default=640, help="eval batch size", required=False)
     parser.add_argument('--kl_reg_coef', type=float, default=0., help='use kl divergence loss', required=False)
-    parser.add_argument('--skip_steps', type=int, default=0, help='skip steps', required=False)
+    parser.add_argument('--skip_steps', type=int, default=80, help='skip steps', required=False)
     parser.add_argument('--truncated_steps', type=int, default=0, help='truncated steps', required=False)
 
     args = parser.parse_args()
