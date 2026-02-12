@@ -8,17 +8,31 @@ We will make molecule/protein generation part publicaly available soon. The algo
 
 ![title](media/summary_image.png) ![title](media/summary_algorithm.png)
 
-## Scripts
-`CUDA_VISIBLE_DEVICES=7 python finetune.py --load_checkpoint_path artifacts/DNA_value:v0/human_enhancer_diffusion_enformer_7_11_1536_16_ep10_it3500.pt --task dna --sample_M 10 --tweedie True --seed 0`
+
+## Quick Start (DNA Task)
+To reproduce the DNA enhancer generation results, ensure your environment is set up and run:
+
+```
+CUDA_VISIBLE_DEVICES=0 python finetune.py --load_checkpoint_path artifacts/DNA_value:v0/human_enhancer_diffusion_enformer_7_11_1536_16_ep10_it3500.pt \
+    --task dna \
+    --sample_M 10 \
+    --tweedie False \
+    --learning_rate 2e-4 \
+    --inner_epochs 2 \
+    --seed 1 \
+    --epochs 200
+```
+
+### Note
+To reproduce successfully, make sure the required models or dataset be properly located in your directories. 
 
 
-`CUDA_VISIBLE_DEVICES=2 python decode_TDS.py --load_checkpoint_path artifacts/DNA_value:v0/human_enhancer_diffusion_enformer_7_11_1536_16_ep10_it3500.pt --task dna --sample_M 10 --seed 0`
-
-
-`CUDA_VISIBLE_DEVICES=2 python decode_DPS.py --load_checkpoint_path artifacts/DNA_value:v0/human_enhancer_diffusion_enformer_7_11_1536_16_ep10_it3500.pt --task dna --sample_M 10 --seed 0`
-
-
-`CUDA_VISIBLE_DEVICES=2 python decode_classfier.py --load_checkpoint_path artifacts/DNA_value:v0/human_enhancer_diffusion_enformer_7_11_1536_16_ep10_it3500.pt --task dna --guidance_scale 2 --seed 0`
+1. `./artifacts/DNA_value:v0/human_enhancer_diffusion_enformer_7_11_1536_16_ep10_it3500.pt`
+2. `./artifacts/DNA_Diffusion:v0/last.ckpt`
+3. `./artifacts/DNA_evaluation:v0/model.ckpt`
+4. `./artifacts/ATAC_oracle/binary_atac_cell_lines.ckpt`
+5. `./data/dataset.csv`
+6. `./artifacts/Pred_acc_oracle/{reward_oracle_eval,reward_oracle_ft}.ckpt`
 
 
 ## Design of Enhancers 
